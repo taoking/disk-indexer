@@ -1,0 +1,7 @@
+/target/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+cleanup-plan*.json
+.DS_Store

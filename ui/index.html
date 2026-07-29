@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disk Indexer · 本地文件资产索引</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --surface:#101d31; --line:#243858; --text:#edf5ff; --muted:#9ab0cf; --brand:#68dfbd; --warn:#ffd36b; --danger:#ff8e9e; }
+    * { box-sizing:border-box; } body { margin:0; font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"PingFang SC",sans-serif; background:radial-gradient(circle at 12% 0,#173958 0,transparent 34rem),var(--bg); color:var(--text); }
+    header, main { width:min(1160px,calc(100% - 32px)); margin:auto; } header { padding:48px 0 30px; display:flex; justify-content:space-between; align-items:end; gap:24px; } h1 { margin:0; font-size:clamp(32px,6vw,62px); letter-spacing:-.06em; } h1 span { color:var(--brand); } h2 { margin:0 0 14px; font-size:19px; } p { color:var(--muted); } .badge { display:inline-block; padding:5px 10px; border:1px solid #367b6d; color:var(--brand); border-radius:999px; font-size:12px; } .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:16px; padding-bottom:42px; } .card { grid-column:span 4; border:1px solid var(--line); background:linear-gradient(145deg,#12243c,#0d182a); border-radius:16px; padding:20px; box-shadow:0 20px 60px #0003; } .wide { grid-column:span 8; } .full { grid-column:1 / -1; } @media(max-width:760px){ .card,.wide { grid-column:1 / -1; } header { align-items:start; flex-direction:column; } }
+    .metric { font-size:36px; font-weight:700; letter-spacing:-.05em; color:var(--brand); } label { display:block; color:var(--muted); font-size:12px; margin:12px 0 5px; } input,select,button { width:100%; border-radius:9px; border:1px solid var(--line); padding:10px 12px; font:inherit; } input,select { background:#071321; color:var(--text); } button { cursor:pointer; margin-top:14px; color:#062018; background:var(--brand); border:0; font-weight:700; } button.secondary { color:var(--text); background:#1b3150; } .switch { display:flex; gap:8px; align-items:center; color:var(--muted); margin-top:12px; } .switch input { width:auto; } .rows { display:grid; gap:8px; } .row { border-top:1px solid var(--line); padding:11px 0; display:flex; justify-content:space-between; gap:16px; } .row small { color:var(--muted); } .status { color:var(--brand); } .offline { color:var(--warn); } pre { overflow:auto; background:#06101c; border:1px solid var(--line); padding:14px; border-radius:10px; color:#cae2ff; min-height:54px; } .notice { border-left:3px solid var(--brand); padding:10px 14px; background:#0d2131; color:var(--muted); } .danger { color:var(--danger); }
+  </style>
+</head>
+<body>
+  <header>
+    <div><span class="badge">LOCAL-ONLY · 安全优先</span><h1>你的文件，<span>清晰可见。</span></h1><p>跨硬盘内容索引、可信重复识别与保守清理建议。</p></div>
+    <div id="dbPath" class="badge">正在连接本地数据库…</div>
+  </header>
+  <main class="grid">
+    <section class="card"><h2>已注册卷</h2><div id="volumeCount" class="metric">—</div><p>在线与离线状态均保留历史。</p></section>
+    <section class="card"><h2>可信重复组</h2><div id="groupCount" class="metric">—</div><p>仅完整 BLAKE3 + 相同大小。</p></section>
+    <section class="card"><h2>安全模型</h2><div class="metric">0</div><p>不会删除、移动或上传原始文件。</p></section>
+    <section class="card wide"><h2>卷状态</h2><div id="volumes" class="rows"><p>加载中…</p></div></section>
+    <section class="card"><h2>注册卷</h2><label>卷根目录</label><input id="volumePath" placeholder="/Volumes/Photos"><label>角色</label><select id="volumeRole"><option value="unknown">未知</option><option value="primary">主数据</option><option value="local_backup">本地备份</option><option value="offsite_backup">异地备份</option><option value="legacy_backup">旧备份</option></select><button onclick="addVolume()">注册本地卷</button></section>
+    <section class="card"><h2>扫描与索引</h2><label>卷根目录</label><input id="scanPath" placeholder="/Volumes/Photos"><div class="switch"><input id="fullHash" type="checkbox"><label for="fullHash">扫描时补齐完整哈希</label></div><div class="switch"><input id="metadataOnly" type="checkbox"><label for="metadataOnly">只扫描元数据</label></div><button onclick="scanVolume()">开始保守扫描</button><button class="secondary" onclick="completeHashes()">为所有在线卷补齐哈希</button></section>
+    <section class="card wide"><h2>重复内容展示</h2><div class="notice">内容重复不等于副本多余。理论可释放空间不构成删除建议。</div><div id="groups" class="rows"><p>加载中…</p></div></section>
+    <section class="card"><h2>清理计划预览</h2><label>目标卷 ID</label><input id="targetVolume" type="number" min="1"><label>保留卷 ID</label><input id="keepVolume" type="number" min="1"><label>最少在线保留副本</label><input id="remainingCopies" type="number" value="1" min="1"><button onclick="previewPlan()">生成只读计划</button></section>
+    <section class="card wide"><h2>操作结果</h2><pre id="output">尚未执行操作。</pre></section>
+    <section class="card full"><div class="notice"><strong>本机安全边界：</strong>服务只监听 <code>127.0.0.1</code>。路径、哈希和数据库不会发送到互联网；本界面不会删除或移动任何文件。</div></section>
+  </main>
+<script>
+  const output = document.querySelector('#output');
+  const show = value => output.textContent = JSON.stringify(value, null, 2);
+  async function api(path, options = {}) { const r = await fetch(path, {headers:{'content-type':'application/json'}, ...options}); const data = await r.json(); if (!r.ok) throw new Error(data.error || '操作失败'); return data; }
+  const esc = text => String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function render(data) { document.querySelector('#dbPath').textContent = data.database_path; document.querySelector('#volumeCount').textContent = data.volumes.length; const groups=data.duplicate_report.groups; document.querySelector('#groupCount').textContent=groups.length; document.querySelector('#volumes').innerHTML=data.volumes.length ? data.volumes.map(v => `<div class="row"><div><strong>${esc(v.volume_name)}</strong><br><small>#${v.id} · ${esc(v.mount_path)} · ${esc(v.role)}</small></div><span class="${v.is_online?'status':'offline'}">${v.is_online?'在线':'离线'}</span></div>`).join('') : '<p>尚未注册卷。</p>'; document.querySelector('#groups').innerHTML=groups.length ? groups.map(g => `<div class="row"><div><strong>${esc(g.full_hash.slice(0,16))}…</strong><br><small>${g.file_size} B · ${g.known_copies} 个已知副本 · ${g.online_copies} 个在线</small></div><span class="status">${g.theoretical_reclaimable_bytes} B 理论空间</span></div>`).join('') : '<p>还没有可信重复组。扫描多个卷或补齐完整哈希后重试。</p>'; }
+  async function refresh(){ try { const data=await api('/api/overview'); render(data); } catch(e){ output.textContent='加载失败：'+e.message; } }
+  async function run(fn){ try{ const data=await fn(); show(data); await refresh(); }catch(e){ output.textContent='操作失败：'+e.message; } }
+  function addVolume(){ return run(()=>api('/api/volumes',{method:'POST',body:JSON.stringify({path:volumePath.value,role:volumeRole.value,write_marker:true})})); }
+  function scanVolume(){ return run(()=>api('/api/scan',{method:'POST',body:JSON.stringify({path:scanPath.value,full_hash:fullHash.checked,metadata_only:metadataOnly.checked})})); }
+  function completeHashes(){ return run(()=>api('/api/hash/complete',{method:'POST',body:JSON.stringify({all:true})})); }
+  function previewPlan(){ return run(()=>api('/api/cleanup-plan',{method:'POST',body:JSON.stringify({target_volume_id:+targetVolume.value,keep_volume_id:+keepVolume.value,min_remaining_copies:+remainingCopies.value})})); }
+  refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+# 详细使用说明
+
+## 1. 安装与构建
+
+需要 Rust stable（项目的最低 Rust 版本由 `Cargo.toml` 声明）。从源码构建：
+
+```bash
+git clone https://github.com/taoking/disk-indexer.git
+cd disk-indexer
+cargo build --release
+./target/release/disk-indexer --help
+```
+
+也可以直接在仓库目录使用 `cargo run -- <command>`。默认数据库是 macOS 的 `~/Library/Application Support/DiskIndexer/index.db`。使用 `--db /安全位置/index.db` 或 `DISK_INDEXER_DB` 可将数据库放到指定位置；建议不要把数据库放在正被扫描的移动硬盘根目录。
+
+## 2. 建议的首次工作流
+
+1. 初始化数据库：`disk-indexer init`。
+2. 将每个真实硬盘/卷单独注册，并设置角色。
+3. 逐卷执行普通扫描。初始阶段只读取同大小候选，减少不必要 I/O。
+4. 查看重复组，先核实在线、离线和缺失状态。
+5. 对希望精确快速查询的卷执行 `hash complete`。
+6. 仅生成清理计划，人工复核后再使用自己的文件管理工具处理文件。
+
+```bash
+disk-indexer init
+disk-indexer volume add /Volumes/MainPhotos --role primary
+disk-indexer volume add /Volumes/OldBackup --role legacy_backup
+disk-indexer scan /Volumes/MainPhotos
+disk-indexer scan /Volumes/OldBackup
+disk-indexer duplicates
+disk-indexer hash complete --all
+```
+
+卷角色可选 `primary`、`local_backup`、`offsite_backup`、`temporary`、`legacy_backup` 和 `unknown`。可写卷默认创建 `.disk-indexer-volume-id`，确保重挂载后仍能识别同一卷。只读卷使用保守系统身份回退；无法得到稳定身份时不会冒险合并记录。
+
+## 3. 使用浏览器 UI
+
+```bash
+disk-indexer ui
+```
+
+命令启动 `http://127.0.0.1:48152` 并尝试打开默认浏览器。可以使用 `--port` 指定端口、`--no-open` 禁止自动打开。关闭终端或按 Ctrl+C 即停止 UI。
+
+页面操作顺序：
+
+1. 在“注册卷”输入卷根路径并选择角色。
+2. 在“扫描与索引”输入同一路径；默认是保守增量扫描。
+3. 勾选“扫描时补齐完整哈希”只适合小卷或已确认愿意接受更多顺序读取的场景；“只扫描元数据”则不读取内容。
+4. 在“重复内容展示”检查卷角色、状态和副本数。
+5. 填写目标卷 ID、保留卷 ID 与最少在线副本数，生成只读清理计划预览。
+
+UI 严格监听 `127.0.0.1`，没有认证、外网监听、云同步或遥测。不要自行将端口转发到局域网或公网；索引内容可泄露文件名和目录结构。
+
+## 4. CLI 参考
+
+```bash
+# 卷
+disk-indexer volume list
+disk-indexer volume show 1
+disk-indexer volume add /Volumes/Photos --role primary --no-write-marker
+
+# 扫描
+disk-indexer scan /Volumes/Photos --exclude '*.tmp'
+disk-indexer scan /Volumes/Photos --metadata-only
+disk-indexer scan /Volumes/Photos --full-hash
+disk-indexer scan list
+disk-indexer scan show 12 --json
+
+# 查询、报告和验证
+disk-indexer lookup /Volumes/NewDisk/DCIM/IMG_0001.RAW --full-hash --json
+disk-indexer duplicates --min-copies 3 --online-only
+disk-indexer duplicates --csv duplicates.csv
+disk-indexer verify --volume 1 --full-hash
+
+# 清理计划（只写 JSON，不处理文件）
+disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
+  --min-remaining-copies 2 --output cleanup-plan.json
+```
+
+`--json` 适用于脚本或未来 GUI；进度和警告不混入 JSON 标准输出。`duplicates` 的 CSV 将每个副本展开为一行。`lookup --full-hash` 会对路径当前的文件执行精确完整哈希；未传该参数时，抽样匹配只能作为候选提示。
+
+## 5. 清理计划如何阅读
+
+`cleanup plan` 的 `candidate_only` 不是可直接执行的删除指令。它仅代表：目标副本当前在线、指定保留卷有在线可信副本，且移除目标后在线副本数量仍满足阈值。`blocked` 会列出原因，常见情况是保留卷离线、完整哈希缺失或在线副本数量不足。
+
+每次实际人工清理前，应重新扫描相关卷，并对计划中的文件执行 `verify --file-copy <id> --full-hash`。同一物理硬盘的不同分区不等于独立备份；内容相同不等于副本多余。
+
+## 6. 中断、离线和恢复
+
+- 扫描中按 Ctrl+C：已提交的元数据保留，扫描记录标记为 `interrupted`。
+- 使用 `scan <path> --resume` 继续执行幂等增量扫描。
+- 某卷未挂载时，其副本显示为 `offline`，不会被标成 `missing`。
+- 只有卷在线且一次遍历无错误完成后，本次未见的旧路径才成为 `missing`。
+- 读取失败和扫描期间变化的文件会记录错误或 `changed` 状态；其完整哈希不会被信任。
+
+## 7. 故障排查
+
+| 现象 | 处理方式 |
+| --- | --- |
+| 数据库被占用 | 稍后重试；数据库已配置 WAL 和 busy timeout。 |
+| UI 无法启动 | 检查端口占用，换用 `disk-indexer ui --port 48153`。 |
+| 卷身份冲突 | 不要复制 `.disk-indexer-volume-id`；保留原卷标记并为副本生成新标记。 |
+| 找不到重复 | 普通扫描可能尚未计算完整哈希；运行 `hash complete --volume <id>`。 |
+| UI 没有显示离线卷 | 刷新页面；概览请求会重新检查每个已知挂载路径。 |
+
+## 8. 性能检查
+
+大文件采用固定缓冲区流式 BLAKE3。可用以下命令测量当前磁盘的单文件吞吐：
+
+```bash
+disk-indexer-benchmark /Volumes/Photos/large-file.raw
+```
+
+默认扫描保持顺序、单读取器策略。不要为机械硬盘盲目提高并发；`--max-readers` 当前会被保守限制为单读取器。
