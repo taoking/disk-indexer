@@ -25,6 +25,17 @@ cargo build --release
 ./target/release/disk-indexer-benchmark /Volumes/Photos/large-file.raw
 ```
 
+### macOS 原生 App
+
+macOS 14+（Apple Silicon 优先）可构建普通的 SwiftUI App，无需用户安装 Rust，也不使用浏览器、WebView、HTTP 或端口：
+
+```bash
+scripts/build-macos-app.sh
+open build/DerivedData/Build/Products/Debug/DiskIndexer.app
+```
+
+构建脚本会把 `target/release/disk-indexer` 放入 `DiskIndexer.app/Contents/Resources/disk-indexer`。应用只通过 `Bundle.main` 和 `Process.arguments` 调用该文件，所有操作显式传入数据库路径。完整界面说明见 [apps/macos/README.md](apps/macos/README.md) 和 [docs/native-app-architecture.md](docs/native-app-architecture.md)。
+
 默认数据库位置为 macOS 的 `~/Library/Application Support/DiskIndexer/index.db`。可通过 `--db /path/index.db` 或 `DISK_INDEXER_DB` 覆盖。
 
 ## 常用命令
@@ -37,6 +48,7 @@ disk-indexer volume conflicts
 disk-indexer scan /Volumes/Photos
 disk-indexer hash complete --all
 disk-indexer duplicates --csv duplicates.csv
+disk-indexer stats --json
 disk-indexer lookup /Volumes/NewDisk/IMG_0001.RAW --full-hash
 disk-indexer verify --volume 1 --full-hash
 disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
@@ -59,7 +71,7 @@ disk-indexer volume relink --volume 3 --path /Volumes/Photos
 
 首次扫描建议先逐卷运行普通 `scan`，让工具只对同大小候选读取内容；需要“任意新文件都可快速精确比对”时，再分批运行 `hash complete --volume <id>`。
 
-详尽的首次使用、命令参数、JSONL 任务协议、恢复与故障排查见 [docs/usage.md](docs/usage.md)。macOS 原生 App 将通过内置 CLI 子进程调用这些协议，不启动浏览器或本地 HTTP 服务。
+详尽的首次使用、命令参数、JSONL 任务协议、恢复与故障排查见 [docs/usage.md](docs/usage.md)。macOS 原生 App 已通过内置 CLI 子进程调用这些协议，不启动浏览器或本地 HTTP 服务。
 
 ## 安全限制
 

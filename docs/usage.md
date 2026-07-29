@@ -75,6 +75,8 @@ disk-indexer scan show 12 --json
 disk-indexer lookup /Volumes/NewDisk/DCIM/IMG_0001.RAW --full-hash --json
 disk-indexer duplicates --min-copies 3 --online-only
 disk-indexer duplicates --csv duplicates.csv
+disk-indexer duplicates --json --page --after-content-id 0 --limit 50
+disk-indexer stats --json
 disk-indexer verify --volume 1 --full-hash
 
 # 清理计划（只写 JSON，不处理文件）
@@ -83,6 +85,8 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 ```
 
 `--json` 适用于脚本或未来 GUI；进度和警告不混入 JSON 标准输出。`duplicates` 的 CSV 将每个副本展开为一行。`lookup --full-hash` 会对路径当前的文件执行精确完整哈希；未传该参数时，抽样匹配只能作为候选提示。
+
+`duplicates --json --page` 使用 `next_after_content_id` 游标逐页返回重复组，适合原生 App 和大报告浏览；它不与 `--csv` 一起使用，以免产生不完整导出。`stats --json` 返回只读概览统计（schema、卷、文件、完整哈希、可信重复组和理论空间），不会返回文件路径。
 
 长任务供原生 App 或脚本消费时使用 `--jsonl-progress`。stdout 每行都是一个 JSON 事件，绝不混入普通提示文本；诊断日志仍写入 stderr。每个事件包含 `protocol_version`、`type`、`task_id`、`timestamp` 和 `operation`。可用操作：
 
@@ -121,7 +125,22 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 - 只有卷在线且一次遍历无错误完成后，本次未见的旧路径才成为 `missing`。
 - 读取失败和扫描期间变化的文件会记录错误或 `changed` 状态；其完整哈希不会被信任。
 
-## 7. 故障排查
+## 7. macOS 原生 App
+
+在装有 Xcode 26 或兼容版本的 Apple Silicon Mac 上，从仓库根目录执行：
+
+```bash
+scripts/build-macos-app.sh
+open build/DerivedData/Build/Products/Debug/DiskIndexer.app
+```
+
+App 的侧边栏提供概览、硬盘、扫描任务、重复文件、文件查询、清理计划、设置和日志。长任务将 JSONL 实时进度显示在界面中；取消先向内置 CLI 发送 SIGINT，5 秒未退出才 `terminate`。关闭窗口时，若任务仍运行，必须选择等待或安全取消，应用不会静默遗留子进程。
+
+重复组每次读取 50 组，避免完整报告进入 Swift 内存；页面内排序只针对当前已加载的数据。文件查询遇到 `cache_stale` 会明确提示重新计算完整哈希。清理计划页只能生成/导出 JSON，绝不会删除、移动或隔离原始文件。
+
+设置页只允许切换到已经存在、经 Rust CLI 验证可以打开的 SQLite 文件；有运行任务时禁止切换，以避免错误创建或切换数据库。更多结构与协议约束见 [native-app-architecture.md](native-app-architecture.md)。
+
+## 8. 故障排查
 
 | 现象 | 处理方式 |
 | --- | --- |
@@ -129,7 +148,7 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 | 卷身份冲突 | 不要复制 `.disk-indexer-volume-id`；保留原卷标记并为副本生成新标记。 |
 | 找不到重复 | 普通扫描可能尚未计算完整哈希；运行 `hash complete --volume <id>`。 |
 
-## 8. 性能检查
+## 9. 性能检查
 
 大文件采用固定缓冲区流式 BLAKE3。可用以下命令测量当前磁盘的单文件吞吐：
 

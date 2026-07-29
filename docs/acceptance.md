@@ -41,3 +41,19 @@ disk-indexer --db "$root/index.db" scan "$root/volume-a" --metadata-only --jsonl
 ```
 
 stdout 每一行必须是合法 JSON，包含相同的 `task_id`，并以 `task_completed` 结束；不会启动浏览器或监听网络端口。
+
+原生 App 验收：
+
+```bash
+xcodebuild \
+  -project apps/macos/DiskIndexerApp.xcodeproj \
+  -scheme DiskIndexerApp \
+  -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO \
+  test
+scripts/build-macos-app.sh
+test -x build/DerivedData/Build/Products/Debug/DiskIndexer.app/Contents/Resources/disk-indexer
+open build/DerivedData/Build/Products/Debug/DiskIndexer.app
+```
+
+打开后确认侧边栏含概览、硬盘、扫描任务、重复文件、文件查询、清理计划、设置和日志；扫描能显示 JSONL 进度并可取消，清理页只有生成/导出计划，不含删除、废纸篓、隔离或一键清理按钮。

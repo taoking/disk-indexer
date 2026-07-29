@@ -16,3 +16,13 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
+
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: xcodebuild -project apps/macos/DiskIndexerApp.xcodeproj -scheme DiskIndexerApp -destination 'platform=macOS,arch=arm64' CODE_SIGNING_ALLOWED=NO test
+      - run: scripts/build-macos-app.sh
+      - run: test -x build/DerivedData/Build/Products/Debug/DiskIndexer.app/Contents/MacOS/DiskIndexer
+      - run: test -x build/DerivedData/Build/Products/Debug/DiskIndexer.app/Contents/Resources/disk-indexer
