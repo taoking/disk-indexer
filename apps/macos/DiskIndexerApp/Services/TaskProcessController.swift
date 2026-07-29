@@ -27,6 +27,7 @@ enum TaskProcessStatus: Equatable {
 
 /// 将任意字节片段复原为完整 JSON Lines；stdout 不允许混入普通文本。
 final class JSONLineDecoder {
+    static let supportedProtocolVersion = 1
     private var pending = Data()
     private let decoder = JSONDecoder()
 
@@ -54,7 +55,13 @@ final class JSONLineDecoder {
 
     private func decodeLine(_ line: Data) -> [Result<JSONLTaskEvent, RustCommandError>] {
         do {
-            return [.success(try decoder.decode(JSONLTaskEvent.self, from: line))]
+            let event = try decoder.decode(JSONLTaskEvent.self, from: line)
+            guard event.protocolVersion == Self.supportedProtocolVersion else {
+                return [.failure(RustCommandError(
+                    message: "不支持的 JSONL 协议版本 \(event.protocolVersion)；App 仅支持 \(Self.supportedProtocolVersion)。"
+                ))]
+            }
+            return [.success(event)]
         } catch {
             let fragment = String(decoding: line.prefix(300), as: UTF8.self)
             return [.failure(RustCommandError(message: "JSONL 事件无法解析：\(error.localizedDescription)\n\(fragment)"))]
@@ -65,6 +72,7 @@ final class JSONLineDecoder {
 /// 长任务的唯一进程控制器。它只运行 Bundle 内 CLI，实时分离 stdout JSONL 与 stderr 诊断。
 @MainActor
 final class TaskProcessController: ObservableObject {
+    static let maximumRetainedEvents = 500
     @Published private(set) var status: TaskProcessStatus = .idle
     @Published private(set) var currentEvent: JSONLTaskEvent?
     @Published private(set) var events: [JSONLTaskEvent] = []
@@ -149,9 +157,7 @@ final class TaskProcessController: ObservableObject {
         for result in lineDecoder.append(data) {
             switch result {
             case let .success(event):
-                currentEvent = event
-                events.append(event)
-                onEvent?(event)
+                recordEvent(event)
             case let .failure(error):
                 recordDiagnostic(error.message)
             }
@@ -173,9 +179,7 @@ final class TaskProcessController: ObservableObject {
         for result in lineDecoder.finish() {
             switch result {
             case let .success(event):
-                currentEvent = event
-                events.append(event)
-                onEvent?(event)
+                recordEvent(event)
             case let .failure(error):
                 recordDiagnostic(error.message)
             }
@@ -191,5 +195,17 @@ final class TaskProcessController: ObservableObject {
         }
         onFinish?(status)
         onStateFinished?(status)
+    }
+
+    private func recordEvent(_ event: JSONLTaskEvent) {
+        currentEvent = event
+        events = Self.retainingRecentEvents(events, appending: event)
+        onEvent?(event)
+    }
+
+    static func retainingRecentEvents(_ existing: [JSONLTaskEvent], appending event: JSONLTaskEvent) -> [JSONLTaskEvent] {
+        let updated = existing + [event]
+        guard updated.count > maximumRetainedEvents else { return updated }
+        return Array(updated.suffix(maximumRetainedEvents))
     }
 }

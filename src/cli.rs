@@ -13,15 +13,13 @@ use crate::duplicate::{
     DuplicateFilter, duplicate_groups, duplicate_groups_page, lookup, verify_record,
 };
 use crate::model::VolumeRole;
-use crate::protocol::JsonlTask;
+use crate::protocol::{JsonlTask, TaskProgress};
 use crate::report::{
-    CleanupVerificationOptions, create_cleanup_plan_with_verification, duplicate_report,
-    render_cleanup_plan_text, render_duplicates_text, render_lookup_text, write_cleanup_plan,
-    write_csv,
+    CleanupVerificationOptions, create_cleanup_plan_with_verification_and_progress,
+    duplicate_report, render_cleanup_plan_text, render_duplicates_text, render_lookup_text,
+    write_cleanup_plan, write_csv,
 };
-use crate::scanner::{
-    ScanOptions, complete_hashes, complete_hashes_with_cancel, interrupt_flag, scan,
-};
+use crate::scanner::{ScanOptions, complete_hashes_with_cancel_and_progress, interrupt_flag, scan};
 use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
 
 #[derive(Debug, Parser)]
@@ -354,11 +352,37 @@ pub fn run(cli: Cli) -> Result<()> {
             CleanupCommand::Plan(args) => {
                 database.refresh_volume_online_states()?;
                 let task = if args.jsonl_progress {
-                    Some(JsonlTask::start(&mut database, "cleanup_plan")?)
+                    Some(Arc::new(JsonlTask::start(&mut database, "cleanup_plan")?))
                 } else {
                     None
                 };
-                let plan_result = create_cleanup_plan_with_verification(
+                let progress_callback = task.as_ref().map(|task| {
+                    let task = Arc::clone(task);
+                    Arc::new(
+                        move |item: &crate::model::CleanupPlanItem,
+                              completed: usize,
+                              total: usize| {
+                            task.progress(&TaskProgress {
+                                files_seen: u64::try_from(item.all_remaining_candidates.len())
+                                    .unwrap_or(u64::MAX),
+                                files_processed: u64::try_from(
+                                    item.verified_remaining_copies.len()
+                                        + item.failed_remaining_copies.len(),
+                                )
+                                .unwrap_or(u64::MAX),
+                                files_verified: u64::try_from(item.verified_remaining_copies.len())
+                                    .unwrap_or(u64::MAX),
+                                files_failed: u64::try_from(item.failed_remaining_copies.len())
+                                    .unwrap_or(u64::MAX),
+                                groups_seen: u64::try_from(total).unwrap_or(u64::MAX),
+                                groups_processed: u64::try_from(completed).unwrap_or(u64::MAX),
+                                current_group_hash: Some(item.full_hash.clone()),
+                                ..TaskProgress::default()
+                            });
+                        },
+                    ) as crate::report::CleanupProgressCallback
+                });
+                let plan_result = create_cleanup_plan_with_verification_and_progress(
                     &mut database,
                     &config,
                     args.target_volume,
@@ -369,6 +393,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         verify_metadata: args.verify_metadata || args.verify_full_hash,
                         verify_full_hash: args.verify_full_hash,
                     },
+                    progress_callback.as_ref(),
                 );
                 let plan = match plan_result {
                     Ok(plan) => plan,
@@ -386,6 +411,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     return Err(error);
                 }
                 if let Some(task) = &task {
+                    task.progress_force(&TaskProgress {
+                        files_seen: u64::try_from(plan.completed_items).unwrap_or(u64::MAX),
+                        files_processed: u64::try_from(plan.completed_items).unwrap_or(u64::MAX),
+                        files_verified: u64::try_from(plan.verified_items).unwrap_or(u64::MAX),
+                        files_failed: u64::try_from(plan.blocked_items).unwrap_or(u64::MAX),
+                        groups_seen: u64::try_from(plan.items.len()).unwrap_or(u64::MAX),
+                        groups_processed: u64::try_from(plan.completed_items).unwrap_or(u64::MAX),
+                        ..TaskProgress::default()
+                    });
                     task.complete(
                         &mut database,
                         "completed",
@@ -621,14 +655,18 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
         let task = Arc::clone(task);
         Arc::new(
             move |summary: &crate::model::ScanSummary, current_path: Option<&str>| {
-                task.progress(serde_json::json!({
-                    "files_seen": summary.discovered_count,
-                    "files_reused": summary.metadata_reused_count,
-                    "files_sampled": summary.sampled_count,
-                    "files_full_hashed": summary.full_hashed_count,
-                    "bytes_read": summary.bytes_read,
-                    "current_path": current_path,
-                }));
+                task.progress(&TaskProgress {
+                    files_seen: summary.discovered_count,
+                    files_processed: summary.discovered_count,
+                    files_reused: summary.metadata_reused_count,
+                    files_skipped: summary.skipped_count,
+                    files_sampled: summary.sampled_count,
+                    files_full_hashed: summary.full_hashed_count,
+                    files_failed: summary.error_count,
+                    bytes_read: summary.bytes_read,
+                    current_path: current_path.map(str::to_owned),
+                    ..TaskProgress::default()
+                });
             },
         ) as crate::scanner::ScanProgressCallback
     });
@@ -656,6 +694,17 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
         }
     };
     if let Some(task) = &task {
+        task.progress_force(&TaskProgress {
+            files_seen: summary.discovered_count,
+            files_processed: summary.discovered_count,
+            files_reused: summary.metadata_reused_count,
+            files_skipped: summary.skipped_count,
+            files_sampled: summary.sampled_count,
+            files_full_hashed: summary.full_hashed_count,
+            files_failed: summary.error_count,
+            bytes_read: summary.bytes_read,
+            ..TaskProgress::default()
+        });
         task.complete(database, &summary.status, &summary)?;
     } else if command.json {
         print_json(&summary)?;
@@ -689,7 +738,7 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
             }
             database.refresh_volume_online_states()?;
             let task = if jsonl_progress {
-                Some(JsonlTask::start(database, "hash_complete")?)
+                Some(Arc::new(JsonlTask::start(database, "hash_complete")?))
             } else {
                 None
             };
@@ -700,10 +749,40 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
             } else {
                 None
             };
+            let progress_callback = task.as_ref().map(|task| {
+                let task = Arc::clone(task);
+                Arc::new(
+                    move |stats: &crate::scanner::HashStats, current_path: Option<&str>| {
+                        task.progress(&TaskProgress {
+                            files_seen: stats.processed,
+                            files_processed: stats.processed,
+                            files_skipped: stats.skipped,
+                            files_sampled: stats.sampled,
+                            files_full_hashed: stats.full_hashed,
+                            files_failed: stats.errors,
+                            bytes_read: stats.bytes_read,
+                            current_path: current_path.map(str::to_owned),
+                            ..TaskProgress::default()
+                        });
+                    },
+                ) as crate::scanner::HashProgressCallback
+            });
             let stats = match if let Some(cancel_flag) = cancel_flag.as_deref() {
-                complete_hashes_with_cancel(database, config, volume, Some(cancel_flag))
+                complete_hashes_with_cancel_and_progress(
+                    database,
+                    config,
+                    volume,
+                    Some(cancel_flag),
+                    progress_callback.as_ref(),
+                )
             } else {
-                complete_hashes(database, config, volume)
+                complete_hashes_with_cancel_and_progress(
+                    database,
+                    config,
+                    volume,
+                    None,
+                    progress_callback.as_ref(),
+                )
             } {
                 Ok(stats) => stats,
                 Err(error) => {
@@ -714,14 +793,25 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
                 }
             };
             let summary = serde_json::json!({
-                "sampled": stats.sampled,
-                "full_hashed": stats.full_hashed,
-                "errors": stats.errors,
+                "files_processed": stats.processed,
+                "files_skipped": stats.skipped,
+                "files_sampled": stats.sampled,
+                "files_full_hashed": stats.full_hashed,
+                "files_failed": stats.errors,
                 "bytes_read": stats.bytes_read,
                 "interrupted": stats.interrupted,
             });
             if let Some(task) = &task {
-                task.progress(summary.clone());
+                task.progress_force(&TaskProgress {
+                    files_seen: stats.processed,
+                    files_processed: stats.processed,
+                    files_skipped: stats.skipped,
+                    files_sampled: stats.sampled,
+                    files_full_hashed: stats.full_hashed,
+                    files_failed: stats.errors,
+                    bytes_read: stats.bytes_read,
+                    ..TaskProgress::default()
+                });
                 task.complete(
                     database,
                     if stats.interrupted {
@@ -760,8 +850,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
     } else {
         None
     };
-    let mut failures = 0usize;
-    let mut verified = 0usize;
+    let mut counters = VerifyCounters::default();
     let mut interrupted = false;
     if let Some(id) = args.file_copy {
         let record = database
@@ -773,8 +862,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             &record,
             args.full_hash,
             task.as_ref(),
-            &mut verified,
-            &mut failures,
+            &mut counters,
         );
     } else if let Some(volume_id) = args.volume {
         let mut after_id = 0;
@@ -806,8 +894,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
                     &record,
                     args.full_hash,
                     task.as_ref(),
-                    &mut verified,
-                    &mut failures,
+                    &mut counters,
                 );
             }
             if interrupted {
@@ -815,14 +902,25 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             }
         }
     }
-    let summary =
-        serde_json::json!({"verified": verified, "failures": failures, "interrupted": interrupted});
+    let summary = serde_json::json!({
+        "files_processed": counters.processed,
+        "files_verified": counters.verified,
+        "files_failed": counters.failures,
+        "interrupted": interrupted
+    });
     if let Some(task) = &task {
+        task.progress_force(&TaskProgress {
+            files_seen: u64::try_from(counters.processed).unwrap_or(u64::MAX),
+            files_processed: u64::try_from(counters.processed).unwrap_or(u64::MAX),
+            files_verified: u64::try_from(counters.verified).unwrap_or(u64::MAX),
+            files_failed: u64::try_from(counters.failures).unwrap_or(u64::MAX),
+            ..TaskProgress::default()
+        });
         task.complete(
             database,
             if interrupted {
                 "interrupted"
-            } else if failures == 0 {
+            } else if counters.failures == 0 {
                 "completed"
             } else {
                 "completed_with_errors"
@@ -830,10 +928,17 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             &summary,
         )?;
     }
-    if failures > 0 {
-        bail!("验证失败：{failures} 个文件副本未通过");
+    if counters.failures > 0 {
+        bail!("验证失败：{} 个文件副本未通过", counters.failures);
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct VerifyCounters {
+    processed: usize,
+    verified: usize,
+    failures: usize,
 }
 
 fn verify_one(
@@ -842,12 +947,12 @@ fn verify_one(
     record: &crate::model::FileRecord,
     full_hash: bool,
     task: Option<&JsonlTask>,
-    verified: &mut usize,
-    failures: &mut usize,
+    counters: &mut VerifyCounters,
 ) {
+    counters.processed = counters.processed.saturating_add(1);
     match verify_record(database, config, record, full_hash) {
         Ok(()) => {
-            *verified = verified.saturating_add(1);
+            counters.verified = counters.verified.saturating_add(1);
             if task.is_none() {
                 println!(
                     "通过: {}:{}",
@@ -857,7 +962,7 @@ fn verify_one(
             }
         }
         Err(error) => {
-            *failures = failures.saturating_add(1);
+            counters.failures = counters.failures.saturating_add(1);
             if task.is_none() {
                 eprintln!(
                     "失败: {}:{}: {error:#}",
@@ -868,7 +973,14 @@ fn verify_one(
         }
     }
     if let Some(task) = task {
-        task.progress(serde_json::json!({"verified": *verified, "failures": *failures}));
+        task.progress(&TaskProgress {
+            files_seen: u64::try_from(counters.processed).unwrap_or(u64::MAX),
+            files_processed: u64::try_from(counters.processed).unwrap_or(u64::MAX),
+            files_verified: u64::try_from(counters.verified).unwrap_or(u64::MAX),
+            files_failed: u64::try_from(counters.failures).unwrap_or(u64::MAX),
+            current_path: Some(record.relative_path.to_string_lossy().into_owned()),
+            ..TaskProgress::default()
+        });
     }
 }
 

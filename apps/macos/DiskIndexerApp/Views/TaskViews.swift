@@ -47,12 +47,25 @@ struct TasksView: View {
             }
             if let event = appState.taskController.currentEvent {
                 GroupBox("实时进度") {
-                    Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                        GridRow { Text("操作"); Text(event.operation) }
-                        GridRow { Text("已发现文件"); Text("\(event.filesSeen ?? 0)") }
-                        GridRow { Text("元数据复用"); Text("\(event.filesReused ?? 0)") }
-                        GridRow { Text("抽样 / 完整哈希"); Text("\(event.filesSampled ?? 0) / \(event.filesFullHashed ?? 0)") }
-                        GridRow { Text("已读取字节"); Text(ByteCountFormatter.string(fromByteCount: Int64(event.bytesRead ?? 0), countStyle: .file)) }
+                        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                            GridRow { Text("操作"); Text(event.operation) }
+                        if event.operation == "scan" {
+                            GridRow { Text("已发现 / 已处理"); Text("\(progressValue(event.filesSeen)) / \(progressValue(event.filesProcessed))") }
+                            GridRow { Text("元数据复用"); Text(progressValue(event.filesReused)) }
+                            GridRow { Text("抽样 / 完整哈希"); Text("\(progressValue(event.filesSampled)) / \(progressValue(event.filesFullHashed))") }
+                        } else if event.operation == "hash_complete" {
+                            GridRow { Text("已处理"); Text(progressValue(event.filesProcessed)) }
+                            GridRow { Text("完整哈希 / 跳过"); Text("\(progressValue(event.filesFullHashed)) / \(progressValue(event.filesSkipped))") }
+                            GridRow { Text("失败"); Text(progressValue(event.filesFailed)) }
+                        } else if event.operation == "verify" {
+                            GridRow { Text("已处理"); Text(progressValue(event.filesProcessed)) }
+                            GridRow { Text("已验证 / 失败"); Text("\(progressValue(event.filesVerified)) / \(progressValue(event.filesFailed))") }
+                        } else if event.operation == "cleanup_plan" {
+                            GridRow { Text("重复组进度"); Text("\(progressValue(event.groupsProcessed)) / \(progressValue(event.groupsSeen))") }
+                            GridRow { Text("已验证 / 失败副本"); Text("\(progressValue(event.filesVerified)) / \(progressValue(event.filesFailed))") }
+                            if let hash = event.currentGroupHash { GridRow { Text("当前内容组"); Text(hash).font(.caption.monospaced()) } }
+                        }
+                        GridRow { Text("已读取字节"); Text(byteCountValue(event.bytesRead)) }
                         if let path = event.currentPath {
                             GridRow { Text("当前路径"); Text(path).lineLimit(1) }
                         }
@@ -76,6 +89,15 @@ struct TasksView: View {
             if selectedVolumeID == nil { selectedVolumeID = appState.volumes.first?.id }
         }
     }
+}
+
+private func progressValue(_ value: UInt64?) -> String {
+    value.map(String.init) ?? "—"
+}
+
+private func byteCountValue(_ value: UInt64?) -> String {
+    guard let value else { return "—" }
+    return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .file)
 }
 
 private enum DuplicateSort: String, CaseIterable, Identifiable {

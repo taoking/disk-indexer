@@ -694,11 +694,110 @@ fn jsonl_scan_protocol_has_only_valid_events_and_persists_task_history() {
             && event["task_id"] == task_id
             && event["timestamp"].is_string()
     }));
+    let progress = events
+        .iter()
+        .find(|event| event["type"] == "progress")
+        .expect("scan progress event");
+    for field in [
+        "files_seen",
+        "files_processed",
+        "files_reused",
+        "files_skipped",
+        "files_sampled",
+        "files_full_hashed",
+        "files_verified",
+        "files_failed",
+        "groups_seen",
+        "groups_processed",
+        "bytes_read",
+    ] {
+        assert!(
+            progress.get(field).is_some(),
+            "missing progress field {field}"
+        );
+    }
     let config = Config::new(Some(database_path)).expect("config");
     let database = Database::open(&config).expect("open database");
     let tasks = database.task_runs_page(0, 10).expect("task history");
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["status"], "completed");
+}
+
+#[test]
+fn jsonl_hash_progress_is_realtime_and_never_mixes_plain_stdout() {
+    use assert_cmd::Command;
+
+    let temp = tempdir().expect("temporary root");
+    let volume_path = temp.path().join("volume");
+    fs::create_dir_all(&volume_path).expect("volume directory");
+    for index in 0..205_u16 {
+        fs::write(
+            volume_path.join(format!("file-{index:03}")),
+            format!("{index:03}"),
+        )
+        .expect("test file");
+    }
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let volume = registered(
+        register_volume(
+            &mut database,
+            &volume_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register volume"),
+    );
+    scan(
+        &mut database,
+        &config,
+        &volume,
+        &ScanOptions {
+            metadata_only: true,
+            ..ScanOptions::default()
+        },
+    )
+    .expect("metadata scan");
+    let volume_id = volume.id;
+    drop(database);
+
+    let output = Command::cargo_bin("disk-indexer")
+        .expect("binary")
+        .args([
+            "--db",
+            config.database_path.to_string_lossy().as_ref(),
+            "hash",
+            "complete",
+            "--volume",
+            &volume_id.to_string(),
+            "--jsonl-progress",
+        ])
+        .output()
+        .expect("run JSONL hash");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = String::from_utf8(output.stdout)
+        .expect("utf8 JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON line"))
+        .collect::<Vec<_>>();
+    let progress = events
+        .iter()
+        .filter(|event| event["type"] == "progress")
+        .collect::<Vec<_>>();
+    assert!(
+        progress.len() >= 3,
+        "expected periodic progress, got {progress:?}"
+    );
+    assert!(progress.iter().all(|event| {
+        event["operation"] == "hash_complete"
+            && event["files_processed"].is_u64()
+            && event["files_full_hashed"].is_u64()
+            && event["bytes_read"].is_u64()
+    }));
 }
 
 #[test]

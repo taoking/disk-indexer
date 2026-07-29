@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::db::Database;
@@ -24,6 +25,8 @@ pub struct CleanupVerificationOptions {
     pub verify_metadata: bool,
     pub verify_full_hash: bool,
 }
+
+pub type CleanupProgressCallback = Arc<dyn Fn(&CleanupPlanItem, usize, usize) + Send + Sync>;
 
 impl Default for CleanupVerificationOptions {
     fn default() -> Self {
@@ -384,6 +387,26 @@ pub fn create_cleanup_plan_with_verification(
     min_remaining_copies: usize,
     options: CleanupVerificationOptions,
 ) -> Result<CleanupPlan> {
+    create_cleanup_plan_with_verification_and_progress(
+        database,
+        config,
+        target_volume_id,
+        keep_volume_id,
+        min_remaining_copies,
+        options,
+        None,
+    )
+}
+
+pub fn create_cleanup_plan_with_verification_and_progress(
+    database: &mut Database,
+    config: &Config,
+    target_volume_id: i64,
+    keep_volume_id: i64,
+    min_remaining_copies: usize,
+    options: CleanupVerificationOptions,
+    progress_callback: Option<&CleanupProgressCallback>,
+) -> Result<CleanupPlan> {
     // 调用方即使遗漏刷新在线状态，严格模式也绝不能把已卸载卷计入剩余副本。
     database.refresh_volume_online_states()?;
     let mut plan = create_cleanup_plan_with_options(
@@ -403,7 +426,8 @@ pub fn create_cleanup_plan_with_verification(
     };
     let verified_at = now();
     let mut verification_cache = std::collections::HashMap::new();
-    for item in &mut plan.items {
+    let total_items = plan.items.len();
+    for (index, item) in plan.items.iter_mut().enumerate() {
         item.verification_mode = verification_mode.to_owned();
         item.verified_at = Some(verified_at.clone());
         let candidate_result = verify_copy_once(
@@ -547,6 +571,9 @@ pub fn create_cleanup_plan_with_verification(
         } else {
             "blocked".to_owned()
         };
+        if let Some(callback) = progress_callback {
+            callback(item, index.saturating_add(1), total_items);
+        }
     }
     plan.verification_mode = verification_mode.to_owned();
     plan.verified_at = Some(verified_at);

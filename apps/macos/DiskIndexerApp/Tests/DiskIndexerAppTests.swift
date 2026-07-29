@@ -32,4 +32,31 @@ final class DiskIndexerAppTests: XCTestCase {
         XCTAssertFalse(TaskProcessStatus.cancelled.isRunning)
         XCTAssertEqual(TaskProcessStatus.cancelled.label, "已取消")
     }
+
+    func testUnsupportedJSONLProtocolVersionFailsExplicitly() throws {
+        let decoder = JSONLineDecoder()
+        let line = """
+        {"protocol_version":99,"type":"progress","task_id":"task-1","timestamp":"2026-07-29T00:00:00Z","operation":"scan"}
+        """ + "\n"
+        let data = try XCTUnwrap(line.data(using: .utf8))
+        let result = try XCTUnwrap(decoder.append(data).first)
+        guard case let .failure(error) = result else { return XCTFail("应拒绝未知协议版本") }
+        XCTAssertTrue(error.message.contains("不支持的 JSONL 协议版本"))
+    }
+
+    @MainActor
+    func testTaskEventsAreBoundedToFiveHundred() throws {
+        let decoder = JSONLineDecoder()
+        let line = """
+        {"protocol_version":1,"type":"progress","task_id":"task-1","timestamp":"2026-07-29T00:00:00Z","operation":"scan","files_seen":1}
+        """ + "\n"
+        let data = try XCTUnwrap(line.data(using: .utf8))
+        let result = try XCTUnwrap(decoder.append(data).first)
+        guard case let .success(event) = result else { return XCTFail("应解码测试事件") }
+        var events: [JSONLTaskEvent] = []
+        for _ in 0...TaskProcessController.maximumRetainedEvents {
+            events = TaskProcessController.retainingRecentEvents(events, appending: event)
+        }
+        XCTAssertEqual(events.count, TaskProcessController.maximumRetainedEvents)
+    }
 }

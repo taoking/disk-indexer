@@ -1,6 +1,8 @@
 //! SwiftUI 子进程桥接使用的稳定 JSON Lines 任务协议。
 
 use std::io::{self, Write};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -12,11 +14,37 @@ use crate::util::now;
 
 pub const TASK_PROTOCOL_VERSION: u32 = 1;
 
-#[derive(Debug, Clone)]
+/// 所有长任务共用的 JSONL 进度负载。字段始终序列化，避免消费者把“缺失”误判为零。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TaskProgress {
+    pub files_seen: u64,
+    pub files_processed: u64,
+    pub files_reused: u64,
+    pub files_skipped: u64,
+    pub files_sampled: u64,
+    pub files_full_hashed: u64,
+    pub files_verified: u64,
+    pub files_failed: u64,
+    pub groups_seen: u64,
+    pub groups_processed: u64,
+    pub bytes_read: u64,
+    pub current_path: Option<String>,
+    pub current_group_hash: Option<String>,
+}
+
+#[derive(Debug)]
+struct ProgressEmissionState {
+    last_emitted_at: Instant,
+    last_files_processed: u64,
+    last_groups_processed: u64,
+}
+
+#[derive(Debug)]
 pub struct JsonlTask {
     database_id: i64,
     task_uid: String,
     operation: String,
+    progress_state: Mutex<ProgressEmissionState>,
 }
 
 impl JsonlTask {
@@ -27,6 +55,11 @@ impl JsonlTask {
             database_id,
             task_uid,
             operation: operation.to_owned(),
+            progress_state: Mutex::new(ProgressEmissionState {
+                last_emitted_at: Instant::now(),
+                last_files_processed: 0,
+                last_groups_processed: 0,
+            }),
         };
         task.emit("task_started", json!({"status": "running"}))?;
         Ok(task)
@@ -37,8 +70,44 @@ impl JsonlTask {
         &self.task_uid
     }
 
-    pub fn progress(&self, payload: Value) {
-        let _ = self.emit("progress", payload);
+    pub fn progress(&self, progress: &TaskProgress) {
+        self.emit_progress(progress, false);
+    }
+
+    pub fn progress_force(&self, progress: &TaskProgress) {
+        self.emit_progress(progress, true);
+    }
+
+    fn emit_progress(&self, progress: &TaskProgress, force: bool) {
+        let mut state = match self.progress_state.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        let now = Instant::now();
+        let file_delta = progress
+            .files_processed
+            .saturating_sub(state.last_files_processed);
+        let group_delta = progress
+            .groups_processed
+            .saturating_sub(state.last_groups_processed);
+        if !force
+            && file_delta < 100
+            && group_delta == 0
+            && now.duration_since(state.last_emitted_at) < Duration::from_millis(300)
+        {
+            return;
+        }
+        if self
+            .emit(
+                "progress",
+                serde_json::to_value(progress).unwrap_or_else(|_| json!({})),
+            )
+            .is_ok()
+        {
+            state.last_emitted_at = now;
+            state.last_files_processed = progress.files_processed;
+            state.last_groups_processed = progress.groups_processed;
+        }
     }
 
     pub fn complete<T: Serialize>(

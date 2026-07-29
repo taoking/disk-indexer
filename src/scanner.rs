@@ -48,12 +48,16 @@ impl Default for ScanOptions {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HashStats {
+    pub processed: u64,
+    pub skipped: u64,
     pub sampled: u64,
     pub full_hashed: u64,
     pub errors: u64,
     pub bytes_read: u64,
     pub interrupted: bool,
 }
+
+pub type HashProgressCallback = Arc<dyn Fn(&HashStats, Option<&str>) + Send + Sync>;
 
 pub fn scan(
     database: &mut Database,
@@ -108,7 +112,14 @@ pub fn scan(
     };
     let mut last_path: Option<String> = None;
     let mut iteration_error = false;
-    let mut pending_metadata = Vec::with_capacity(config.batch_size.max(1));
+    // JSONL 使用者需要可观察的进度；有回调时最多每 100 个已提交文件刷新一次，
+    // 普通 CLI 仍保留配置的较大批量写入行为。
+    let persistence_batch_size = if options.progress_callback.is_some() {
+        config.batch_size.clamp(1, 100)
+    } else {
+        config.batch_size.max(1)
+    };
+    let mut pending_metadata = Vec::with_capacity(persistence_batch_size);
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -142,7 +153,7 @@ pub fn scan(
         match file_metadata(root, path) {
             Ok(metadata) => {
                 pending_metadata.push(metadata);
-                if pending_metadata.len() >= config.batch_size.max(1) {
+                if pending_metadata.len() >= persistence_batch_size {
                     if let Err(error) = persist_metadata_batch(
                         database,
                         volume.id,
@@ -204,7 +215,13 @@ pub fn scan(
     }
     if summary.status == "completed" && !options.metadata_only {
         let hashes = if options.full_hash {
-            complete_hashes_with_cancel(database, config, Some(volume.id), Some(&cancelled))?
+            complete_hashes_with_cancel_and_progress(
+                database,
+                config,
+                Some(volume.id),
+                Some(&cancelled),
+                None,
+            )?
         } else {
             hash_duplicate_candidates(database, config)?
         };
@@ -309,7 +326,7 @@ pub fn complete_hashes(
     config: &Config,
     only_volume: Option<i64>,
 ) -> Result<HashStats> {
-    complete_hashes_with_cancel(database, config, only_volume, None)
+    complete_hashes_with_cancel_and_progress(database, config, only_volume, None, None)
 }
 
 pub fn complete_hashes_with_cancel(
@@ -317,6 +334,16 @@ pub fn complete_hashes_with_cancel(
     config: &Config,
     only_volume: Option<i64>,
     cancel_flag: Option<&AtomicBool>,
+) -> Result<HashStats> {
+    complete_hashes_with_cancel_and_progress(database, config, only_volume, cancel_flag, None)
+}
+
+pub fn complete_hashes_with_cancel_and_progress(
+    database: &mut Database,
+    config: &Config,
+    only_volume: Option<i64>,
+    cancel_flag: Option<&AtomicBool>,
+    progress_callback: Option<&HashProgressCallback>,
 ) -> Result<HashStats> {
     let mut stats = HashStats::default();
     let volumes = database
@@ -352,14 +379,34 @@ pub fn complete_hashes_with_cancel(
                 }
                 if record.full_hash.is_none() {
                     hash_full_for_record(database, config, &record, &volumes, &mut stats)?;
+                } else {
+                    stats.skipped = stats.skipped.saturating_add(1);
                 }
+                stats.processed = stats.processed.saturating_add(1);
+                emit_hash_progress(
+                    progress_callback,
+                    &stats,
+                    Some(&record.absolute_path(&volume.mount_path)),
+                );
             }
             if stats.interrupted {
                 break;
             }
         }
     }
+    emit_hash_progress(progress_callback, &stats, None);
     Ok(stats)
+}
+
+fn emit_hash_progress(
+    callback: Option<&HashProgressCallback>,
+    stats: &HashStats,
+    current_path: Option<&Path>,
+) {
+    if let Some(callback) = callback {
+        let current_path = current_path.map(|path| path.to_string_lossy().into_owned());
+        callback(stats, current_path.as_deref());
+    }
 }
 
 fn hash_sample_for_record(

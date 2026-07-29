@@ -321,7 +321,13 @@ private func eventDescription(_ event: JSONLTaskEvent) -> String {
     switch event.type {
     case "task_started": "\(event.operation) 已开始"
     case "task_completed": "\(event.operation) \(event.status ?? "结束")"
-    case "progress": "\(event.operation)：已发现 \(event.filesSeen ?? 0) 个文件"
+    case "progress":
+        switch event.operation {
+        case "hash_complete": "完整哈希：已处理 \(event.filesProcessed.map(String.init) ?? "—") 个文件"
+        case "verify": "验证：已通过 \(event.filesVerified.map(String.init) ?? "—") 个文件"
+        case "cleanup_plan": "清理计划：已处理 \(event.groupsProcessed.map(String.init) ?? "—") 个重复组"
+        default: "扫描：已发现 \(event.filesSeen.map(String.init) ?? "—") 个文件"
+        }
     default: "\(event.operation)：\(event.type)"
     }
 }

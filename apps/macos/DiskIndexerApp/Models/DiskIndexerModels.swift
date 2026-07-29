@@ -259,10 +259,17 @@ struct JSONLTaskEvent: Codable, Identifiable, Hashable {
     let status: String?
     let currentPath: String?
     let filesSeen: UInt64?
+    let filesProcessed: UInt64?
     let filesReused: UInt64?
+    let filesSkipped: UInt64?
     let filesSampled: UInt64?
     let filesFullHashed: UInt64?
+    let filesVerified: UInt64?
+    let filesFailed: UInt64?
+    let groupsSeen: UInt64?
+    let groupsProcessed: UInt64?
     let bytesRead: UInt64?
+    let currentGroupHash: String?
     let error: String?
 
     var id: String { "\(taskID):\(timestamp):\(type)" }
@@ -276,10 +283,17 @@ struct JSONLTaskEvent: Codable, Identifiable, Hashable {
         case status
         case currentPath = "current_path"
         case filesSeen = "files_seen"
+        case filesProcessed = "files_processed"
         case filesReused = "files_reused"
+        case filesSkipped = "files_skipped"
         case filesSampled = "files_sampled"
         case filesFullHashed = "files_full_hashed"
+        case filesVerified = "files_verified"
+        case filesFailed = "files_failed"
+        case groupsSeen = "groups_seen"
+        case groupsProcessed = "groups_processed"
         case bytesRead = "bytes_read"
+        case currentGroupHash = "current_group_hash"
         case error
     }
 }
