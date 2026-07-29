@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 11（稳定性、CI、App Bundle 与最终验收）已完成。本轮已以 macOS 原生 App 完全替代浏览器 UI。
+Phase 12.1（回归基线）已完成；下一步是 Phase 12.2（整盘级物理设备身份）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
 
 ## 已完成
 
@@ -24,8 +24,19 @@ Phase 11（稳定性、CI、App Bundle 与最终验收）已完成。本轮已�
 - Phase 10.2：新增 Apple Silicon 优先、macOS 14+ 的 SwiftUI Xcode 项目和独立单元测试；实现概览、硬盘注册、设置页，以及通过 `Bundle.main` 定位内置 Rust CLI 的 `Process.arguments` 调用边界。构建脚本会将 release `disk-indexer` 复制到 `DiskIndexer.app/Contents/Resources/`；同步读取 stdout/stderr 防止大输出管道阻塞。未引入 PATH、shell、HTTP、浏览器或端口。
 - Phase 10.3：新增扫描任务、重复文件、文件查询、清理计划和日志原生页；长任务由 `TaskProcessController` 使用 JSONL 实时展示，stdout/stderr 分离，取消先 SIGINT、超时才 terminate，关闭窗口时要求选择安全取消或保留窗口。重复组新增 Rust 内容 ID 游标 API（每页 50）而非一次传给 Swift；概览新增只读统计接口。文件查询明确标示 `cache_stale`，清理页只能生成/导出 JSON 计划，绝无删除操作。Swift 单测覆盖 JSONL 分段解码和取消状态。
 - Phase 11：新增 macOS App GitHub Actions job（Swift 测试、Bundle 构建与内置 Rust binary 检查）、完整原生 App/迁移/身份安全文档和验收步骤；`scripts/build-macos-app.sh` 已实际生成 `DiskIndexer.app`，主程序与内置 CLI 均为 arm64 Mach-O，后者可执行且版本为 0.1.0。已用 `open` 启动 App 并确认进程仍运行；该进程无 TCP 监听，CLI/依赖树也不含旧 Web UI 组件。为兼容 GitHub `macos-14` 的 Xcode 15.4，项目使用 Swift 5 语言模式（仍使用 Swift Concurrency API），而不是要求仅本机已有的 Swift 6。
+- Phase 12.1：已核验 `main` 与 `origin/main` 同步；`cargo fmt --check`、严格 Clippy、全部 Rust 测试（7 单元、12 集成）、Swift 测试（3）和 `scripts/build-macos-app.sh` 均通过。隔离数据库 schema 为 v4；最新 GitHub Actions `30438122820`（`c1e9bd4`）的 `quality` 与 `macos-app` job 均成功。构建仅有 AppIntents 未使用的 Xcode 警告，不影响产物。
 
 ## 待完成
+
+- Phase 12.2：整盘级物理设备身份与旧数据保守回填。
+- Phase 12.3：严格清理验证重新计数。
+- Phase 12.4：统一 JSONL 长任务进度。
+- Phase 12.5：任务守卫、取消与异常恢复。
+- Phase 12.6：Swift 清理任务上下文绑定。
+- Phase 12.7：迁移备份、完整性检查与恢复提示。
+- Phase 12.8：重复报告的流式大数据输出。
+- Phase 12.9：Swift 设置持久化与测试补齐。
+- Phase 12.10：CI 与真实 App 最终验收。
 
 
 ## 技术决策
@@ -48,6 +59,7 @@ Phase 11（稳定性、CI、App Bundle 与最终验收）已完成。本轮已�
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 - Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 - Phase 11：当前 Bundle 为未签名 Debug 构建，尚未做 Developer ID 签名、公证或 dmg/pkg 发布；Universal 2 只保留了构建扩展说明，尚未实际合并 x86_64 二进制。GitHub Actions 会在推送本提交后验证 macOS 环境。
+- Phase 12.1：当前 schema v4 尚未具备整盘级身份、迁移前备份或统一严格验证；这些缺口将分阶段收口，完成前绝不标记 Phase 12 完成。
 
 ## 发布记录
 
