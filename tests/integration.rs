@@ -4,6 +4,7 @@ use disk_indexer::config::Config;
 use disk_indexer::db::Database;
 use disk_indexer::duplicate::{DuplicateFilter, duplicate_groups, duplicate_groups_page, lookup};
 use disk_indexer::model::{Volume, VolumeRole};
+use disk_indexer::protocol::TaskRunGuard;
 use disk_indexer::report::{
     CleanupVerificationOptions, create_cleanup_plan, create_cleanup_plan_with_verification,
     duplicate_report, write_csv,
@@ -1167,6 +1168,63 @@ fn interrupted_scan_can_be_resumed() {
     .expect("resume");
     assert_eq!(resumed.status, "completed");
     assert_eq!(resumed.discovered_count, 1);
+}
+
+#[test]
+fn reopening_database_marks_only_orphaned_running_tasks_abandoned() {
+    let temp = tempdir().expect("temporary root");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    database
+        .create_task_run("orphaned-task", "verify")
+        .expect("create running task");
+    let completed_id = database
+        .create_task_run("completed-task", "scan")
+        .expect("create completed task");
+    database
+        .finish_task_run(completed_id, "completed", None, None)
+        .expect("finish task");
+    drop(database);
+
+    let database = Database::open(&config).expect("reopen database");
+    let tasks = database.task_runs_page(0, 10).expect("task history");
+    let orphaned = tasks
+        .iter()
+        .find(|task| task["task_uid"] == "orphaned-task")
+        .expect("orphaned task");
+    assert_eq!(orphaned["status"], "abandoned");
+    assert!(
+        orphaned["error_message"]
+            .as_str()
+            .expect("recovery message")
+            .contains("previous process exited")
+    );
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task["task_uid"] == "completed-task")
+            .expect("completed task")["status"],
+        "completed"
+    );
+}
+
+#[test]
+fn task_guard_marks_unfinished_task_abandoned_on_drop() {
+    let temp = tempdir().expect("temporary root");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let task_id = {
+        let guard =
+            TaskRunGuard::start(&mut database, &config, "cleanup_plan").expect("start task guard");
+        guard.task_id().to_owned()
+    };
+    let task = database
+        .task_runs_page(0, 10)
+        .expect("task history")
+        .into_iter()
+        .find(|task| task["task_uid"] == task_id)
+        .expect("guard task");
+    assert_eq!(task["status"], "abandoned");
 }
 
 #[cfg(unix)]

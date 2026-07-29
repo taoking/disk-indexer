@@ -1,6 +1,7 @@
 //! SwiftUI 子进程桥接使用的稳定 JSON Lines 任务协议。
 
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -9,6 +10,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::config::Config;
 use crate::db::Database;
 use crate::util::now;
 
@@ -45,6 +47,87 @@ pub struct JsonlTask {
     task_uid: String,
     operation: String,
     progress_state: Mutex<ProgressEmissionState>,
+}
+
+/// 将任务的正常结束、失败和 SIGINT 收口在同一处。若调用路径意外提前返回，Drop 会用
+/// 独立 SQLite 连接把遗留 running 状态降为 abandoned，避免历史界面永久显示“运行中”。
+pub struct TaskRunGuard {
+    task: Arc<JsonlTask>,
+    config: Config,
+    finalized: bool,
+}
+
+impl TaskRunGuard {
+    pub fn start(database: &mut Database, config: &Config, operation: &str) -> Result<Self> {
+        Ok(Self {
+            task: Arc::new(JsonlTask::start(database, operation)?),
+            config: config.clone(),
+            finalized: false,
+        })
+    }
+
+    #[must_use]
+    pub fn task_id(&self) -> &str {
+        self.task.task_uid()
+    }
+
+    #[must_use]
+    pub fn task_handle(&self) -> Arc<JsonlTask> {
+        Arc::clone(&self.task)
+    }
+
+    #[must_use]
+    pub fn task_ref(&self) -> &JsonlTask {
+        &self.task
+    }
+
+    pub fn progress(&self, progress: &TaskProgress) {
+        self.task.progress(progress);
+    }
+
+    pub fn progress_force(&self, progress: &TaskProgress) {
+        self.task.progress_force(progress);
+    }
+
+    pub fn complete<T: Serialize>(
+        &mut self,
+        database: &mut Database,
+        status: &str,
+        summary: &T,
+    ) -> Result<()> {
+        self.task.complete(database, status, summary)?;
+        self.finalized = true;
+        Ok(())
+    }
+
+    pub fn fail(&mut self, database: &mut Database, error: &anyhow::Error) -> Result<()> {
+        self.task.fail(database, error)?;
+        self.finalized = true;
+        Ok(())
+    }
+
+    pub fn interrupt<T: Serialize>(&mut self, database: &mut Database, summary: &T) -> Result<()> {
+        self.complete(database, "interrupted", summary)
+    }
+}
+
+impl Drop for TaskRunGuard {
+    fn drop(&mut self) {
+        if self.finalized {
+            return;
+        }
+        if let Ok(mut database) = Database::open(&self.config) {
+            let _ = database.finish_task_run_by_uid(
+                self.task.task_uid(),
+                "abandoned",
+                Some("previous process exited without completing task"),
+            );
+        }
+        let _ = self.task.emit(
+            "task_completed",
+            json!({"status": "abandoned", "error": "previous process exited without completing task"}),
+        );
+    }
 }
 
 impl JsonlTask {

@@ -13,11 +13,12 @@ use crate::duplicate::{
     DuplicateFilter, duplicate_groups, duplicate_groups_page, lookup, verify_record,
 };
 use crate::model::VolumeRole;
-use crate::protocol::{JsonlTask, TaskProgress};
+use crate::protocol::{JsonlTask, TaskProgress, TaskRunGuard};
 use crate::report::{
-    CleanupVerificationOptions, create_cleanup_plan_with_verification_and_progress,
-    duplicate_report, render_cleanup_plan_text, render_duplicates_text, render_lookup_text,
-    write_cleanup_plan, write_csv,
+    CleanupTaskControl, CleanupVerificationOptions,
+    create_cleanup_plan_with_verification_and_progress_and_cancel, duplicate_report,
+    render_cleanup_plan_text, render_duplicates_text, render_lookup_text,
+    write_cleanup_plan_atomically, write_csv,
 };
 use crate::scanner::{ScanOptions, complete_hashes_with_cancel_and_progress, interrupt_flag, scan};
 use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
@@ -351,13 +352,15 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Cleanup { command } => match command {
             CleanupCommand::Plan(args) => {
                 database.refresh_volume_online_states()?;
-                let task = if args.jsonl_progress {
-                    Some(Arc::new(JsonlTask::start(&mut database, "cleanup_plan")?))
+                let mut task = if args.jsonl_progress {
+                    Some(TaskRunGuard::start(&mut database, &config, "cleanup_plan")?)
                 } else {
                     None
                 };
+                let cancel_flag = interrupt_flag()?;
+                cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
                 let progress_callback = task.as_ref().map(|task| {
-                    let task = Arc::clone(task);
+                    let task = task.task_handle();
                     Arc::new(
                         move |item: &crate::model::CleanupPlanItem,
                               completed: usize,
@@ -382,7 +385,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         },
                     ) as crate::report::CleanupProgressCallback
                 });
-                let plan_result = create_cleanup_plan_with_verification_and_progress(
+                let plan_result = create_cleanup_plan_with_verification_and_progress_and_cancel(
                     &mut database,
                     &config,
                     args.target_volume,
@@ -393,24 +396,35 @@ pub fn run(cli: Cli) -> Result<()> {
                         verify_metadata: args.verify_metadata || args.verify_full_hash,
                         verify_full_hash: args.verify_full_hash,
                     },
-                    progress_callback.as_ref(),
+                    CleanupTaskControl {
+                        progress_callback: progress_callback.as_ref(),
+                        cancel_flag: Some(&cancel_flag),
+                    },
                 );
                 let plan = match plan_result {
                     Ok(plan) => plan,
                     Err(error) => {
-                        if let Some(task) = &task {
+                        if let Some(task) = &mut task {
                             task.fail(&mut database, &error)?;
                         }
                         return Err(error);
                     }
                 };
-                if let Err(error) = write_cleanup_plan(&args.output, &plan) {
-                    if let Some(task) = &task {
+                if plan.cancelled {
+                    if let Some(task) = &mut task {
+                        task.interrupt(&mut database, &serde_json::json!({"cancelled": true}))?;
+                    }
+                    eprintln!("清理计划已取消；未写入最终输出文件。");
+                    return Ok(());
+                }
+                let task_id = task.as_ref().map(|task| task.task_id()).unwrap_or("manual");
+                if let Err(error) = write_cleanup_plan_atomically(&args.output, &plan, task_id) {
+                    if let Some(task) = &mut task {
                         task.fail(&mut database, &error)?;
                     }
                     return Err(error);
                 }
-                if let Some(task) = &task {
+                if let Some(task) = &mut task {
                     task.progress_force(&TaskProgress {
                         files_seen: u64::try_from(plan.completed_items).unwrap_or(u64::MAX),
                         files_processed: u64::try_from(plan.completed_items).unwrap_or(u64::MAX),
@@ -646,13 +660,13 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
     let volume = registration.volume.context(
         "扫描已停止：检测到 possible_clone；请先使用 volume conflicts 审核并 resolve 或 relink",
     )?;
-    let task = if command.jsonl_progress {
-        Some(Arc::new(JsonlTask::start(database, "scan")?))
+    let mut task = if command.jsonl_progress {
+        Some(TaskRunGuard::start(database, config, "scan")?)
     } else {
         None
     };
     let progress_callback = task.as_ref().map(|task| {
-        let task = Arc::clone(task);
+        let task = task.task_handle();
         Arc::new(
             move |summary: &crate::model::ScanSummary, current_path: Option<&str>| {
                 task.progress(&TaskProgress {
@@ -687,13 +701,13 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
     let summary = match summary_result {
         Ok(summary) => summary,
         Err(error) => {
-            if let Some(task) = &task {
+            if let Some(task) = &mut task {
                 task.fail(database, &error)?;
             }
             return Err(error);
         }
     };
-    if let Some(task) = &task {
+    if let Some(task) = &mut task {
         task.progress_force(&TaskProgress {
             files_seen: summary.discovered_count,
             files_processed: summary.discovered_count,
@@ -737,8 +751,8 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
                 bail!("hash complete 必须指定 --volume <id> 或 --all");
             }
             database.refresh_volume_online_states()?;
-            let task = if jsonl_progress {
-                Some(Arc::new(JsonlTask::start(database, "hash_complete")?))
+            let mut task = if jsonl_progress {
+                Some(TaskRunGuard::start(database, config, "hash_complete")?)
             } else {
                 None
             };
@@ -750,7 +764,7 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
                 None
             };
             let progress_callback = task.as_ref().map(|task| {
-                let task = Arc::clone(task);
+                let task = task.task_handle();
                 Arc::new(
                     move |stats: &crate::scanner::HashStats, current_path: Option<&str>| {
                         task.progress(&TaskProgress {
@@ -786,7 +800,7 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
             } {
                 Ok(stats) => stats,
                 Err(error) => {
-                    if let Some(task) = &task {
+                    if let Some(task) = &mut task {
                         task.fail(database, &error)?;
                     }
                     return Err(error);
@@ -801,7 +815,7 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
                 "bytes_read": stats.bytes_read,
                 "interrupted": stats.interrupted,
             });
-            if let Some(task) = &task {
+            if let Some(task) = &mut task {
                 task.progress_force(&TaskProgress {
                     files_seen: stats.processed,
                     files_processed: stats.processed,
@@ -838,8 +852,8 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
     if args.file_copy.is_none() && args.volume.is_none() {
         bail!("verify 必须指定 --volume <id> 或 --file-copy <id>");
     }
-    let task = if args.jsonl_progress {
-        Some(JsonlTask::start(database, "verify")?)
+    let mut task = if args.jsonl_progress {
+        Some(TaskRunGuard::start(database, config, "verify")?)
     } else {
         None
     };
@@ -861,7 +875,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             config,
             &record,
             args.full_hash,
-            task.as_ref(),
+            task.as_ref().map(TaskRunGuard::task_ref),
             &mut counters,
         );
     } else if let Some(volume_id) = args.volume {
@@ -893,7 +907,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
                     config,
                     &record,
                     args.full_hash,
-                    task.as_ref(),
+                    task.as_ref().map(TaskRunGuard::task_ref),
                     &mut counters,
                 );
             }
@@ -908,7 +922,7 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
         "files_failed": counters.failures,
         "interrupted": interrupted
     });
-    if let Some(task) = &task {
+    if let Some(task) = &mut task {
         task.progress_force(&TaskProgress {
             files_seen: u64::try_from(counters.processed).unwrap_or(u64::MAX),
             files_processed: u64::try_from(counters.processed).unwrap_or(u64::MAX),
@@ -927,6 +941,9 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             },
             &summary,
         )?;
+    }
+    if interrupted {
+        return Ok(());
     }
     if counters.failures > 0 {
         bail!("验证失败：{} 个文件副本未通过", counters.failures);

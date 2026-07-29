@@ -110,6 +110,7 @@ impl Database {
             path: config.database_path.clone(),
         };
         database.migrate()?;
+        database.recover_abandoned_task_runs()?;
         Ok(database)
     }
 
@@ -226,6 +227,33 @@ impl Database {
             params![task_uid, operation, timestamp],
         )?;
         Ok(self.connection.last_insert_rowid())
+    }
+
+    /// 进程重启后不可能继续证明旧进程仍存活；保守地把遗留 running 任务标为 abandoned。
+    pub fn recover_abandoned_task_runs(&mut self) -> Result<u64> {
+        let timestamp = now();
+        let changed = self.connection.execute(
+            "UPDATE task_runs SET status = 'abandoned', finished_at = ?1,
+                error_message = 'previous process exited without completing task', updated_at = ?1
+             WHERE status = 'running'",
+            [timestamp],
+        )?;
+        Ok(u64::try_from(changed).unwrap_or(u64::MAX))
+    }
+
+    pub fn finish_task_run_by_uid(
+        &mut self,
+        task_uid: &str,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let timestamp = now();
+        self.connection.execute(
+            "UPDATE task_runs SET status = ?1, finished_at = ?2, error_message = ?3, updated_at = ?2
+             WHERE task_uid = ?4 AND status = 'running'",
+            params![status, timestamp, error_message, task_uid],
+        )?;
+        Ok(())
     }
 
     pub fn update_task_progress(

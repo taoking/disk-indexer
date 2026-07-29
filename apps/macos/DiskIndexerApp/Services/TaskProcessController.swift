@@ -6,6 +6,7 @@ enum TaskProcessStatus: Equatable {
     case running
     case cancelling
     case cancelled
+    case interrupted
     case completed
     case failed(String)
 
@@ -19,6 +20,7 @@ enum TaskProcessStatus: Equatable {
         case .running: "运行中"
         case .cancelling: "正在取消"
         case .cancelled: "已取消"
+        case .interrupted: "已中断"
         case .completed: "已完成"
         case .failed: "失败"
         }
@@ -185,7 +187,12 @@ final class TaskProcessController: ObservableObject {
             }
         }
         self.process = nil
-        if terminationWasRequested {
+        let reportedStatus = events.last(where: { $0.type == "task_completed" })?.status
+        if reportedStatus == "interrupted" {
+            status = .interrupted
+        } else if reportedStatus == "abandoned" {
+            status = .failed("任务未正常结束，已标记为 abandoned")
+        } else if terminationWasRequested {
             status = .cancelled
         } else if process.terminationStatus == 0 {
             status = .completed

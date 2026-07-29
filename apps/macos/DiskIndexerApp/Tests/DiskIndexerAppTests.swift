@@ -31,6 +31,8 @@ final class DiskIndexerAppTests: XCTestCase {
     func testCancelledTaskStateIsNotRunning() {
         XCTAssertFalse(TaskProcessStatus.cancelled.isRunning)
         XCTAssertEqual(TaskProcessStatus.cancelled.label, "已取消")
+        XCTAssertFalse(TaskProcessStatus.interrupted.isRunning)
+        XCTAssertEqual(TaskProcessStatus.interrupted.label, "已中断")
     }
 
     func testUnsupportedJSONLProtocolVersionFailsExplicitly() throws {

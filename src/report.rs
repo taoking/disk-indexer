@@ -1,6 +1,6 @@
 //! 面向人和脚本的稳定报告及只读清理计划。
 
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -8,6 +8,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -27,6 +28,11 @@ pub struct CleanupVerificationOptions {
 }
 
 pub type CleanupProgressCallback = Arc<dyn Fn(&CleanupPlanItem, usize, usize) + Send + Sync>;
+
+pub struct CleanupTaskControl<'a> {
+    pub progress_callback: Option<&'a CleanupProgressCallback>,
+    pub cancel_flag: Option<&'a AtomicBool>,
+}
 
 impl Default for CleanupVerificationOptions {
     fn default() -> Self {
@@ -407,6 +413,29 @@ pub fn create_cleanup_plan_with_verification_and_progress(
     options: CleanupVerificationOptions,
     progress_callback: Option<&CleanupProgressCallback>,
 ) -> Result<CleanupPlan> {
+    create_cleanup_plan_with_verification_and_progress_and_cancel(
+        database,
+        config,
+        target_volume_id,
+        keep_volume_id,
+        min_remaining_copies,
+        options,
+        CleanupTaskControl {
+            progress_callback,
+            cancel_flag: None,
+        },
+    )
+}
+
+pub fn create_cleanup_plan_with_verification_and_progress_and_cancel(
+    database: &mut Database,
+    config: &Config,
+    target_volume_id: i64,
+    keep_volume_id: i64,
+    min_remaining_copies: usize,
+    options: CleanupVerificationOptions,
+    control: CleanupTaskControl<'_>,
+) -> Result<CleanupPlan> {
     // 调用方即使遗漏刷新在线状态，严格模式也绝不能把已卸载卷计入剩余副本。
     database.refresh_volume_online_states()?;
     let mut plan = create_cleanup_plan_with_options(
@@ -427,7 +456,15 @@ pub fn create_cleanup_plan_with_verification_and_progress(
     let verified_at = now();
     let mut verification_cache = std::collections::HashMap::new();
     let total_items = plan.items.len();
+    let mut cancelled = false;
     for (index, item) in plan.items.iter_mut().enumerate() {
+        if control
+            .cancel_flag
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            cancelled = true;
+            break;
+        }
         item.verification_mode = verification_mode.to_owned();
         item.verified_at = Some(verified_at.clone());
         let candidate_result = verify_copy_once(
@@ -571,13 +608,29 @@ pub fn create_cleanup_plan_with_verification_and_progress(
         } else {
             "blocked".to_owned()
         };
-        if let Some(callback) = progress_callback {
+        if let Some(callback) = control.progress_callback {
             callback(item, index.saturating_add(1), total_items);
         }
     }
     plan.verification_mode = verification_mode.to_owned();
     plan.verified_at = Some(verified_at);
-    plan.completed_items = plan.items.len();
+    if cancelled {
+        plan.cancelled = true;
+        for item in plan
+            .items
+            .iter_mut()
+            .filter(|item| item.verified_at.is_none())
+        {
+            item.status = "cancelled".to_owned();
+            item.blocked_reasons
+                .push("任务在完成验证前被取消。".to_owned());
+        }
+    }
+    plan.completed_items = plan
+        .items
+        .iter()
+        .filter(|item| item.verified_at.is_some())
+        .count();
     plan.blocked_items = plan
         .items
         .iter()
@@ -640,10 +693,41 @@ fn failure_is_stale(failure: &str) -> bool {
 }
 
 pub fn write_cleanup_plan(path: &Path, plan: &CleanupPlan) -> Result<()> {
-    let file =
-        File::create(path).with_context(|| format!("无法创建清理计划 {}", path.display()))?;
-    serde_json::to_writer_pretty(file, plan).context("无法序列化清理计划")?;
-    Ok(())
+    write_cleanup_plan_atomically(path, plan, "manual")
+}
+
+pub fn write_cleanup_plan_atomically(path: &Path, plan: &CleanupPlan, task_id: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .context("清理计划输出路径缺少文件名")?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{filename}.tmp.{task_id}"));
+    let write_result = (|| {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("无法创建清理计划临时文件 {}", temporary.display()))?;
+        serde_json::to_writer_pretty(&file, plan).context("无法序列化清理计划")?;
+        file.sync_all()
+            .with_context(|| format!("无法同步清理计划临时文件 {}", temporary.display()))?;
+        fs::rename(&temporary, path).with_context(|| {
+            format!(
+                "无法原子替换清理计划 {} 到 {}",
+                temporary.display(),
+                path.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 #[must_use]

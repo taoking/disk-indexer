@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 12.4（统一 JSONL 长任务进度）已完成；下一步是 Phase 12.5（任务守卫、取消与异常恢复）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
+Phase 12.5（任务守卫、取消与异常恢复）已完成；下一步是 Phase 12.6（Swift 清理任务上下文绑定）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
 
 ## 已完成
 
@@ -28,10 +28,10 @@ Phase 12.4（统一 JSONL 长任务进度）已完成；下一步是 Phase 12.5�
 - Phase 12.2：新增 `0005_physical_device_identity_v2`。物理设备现保存整盘标识、整盘 Media UUID、硬件序列号、身份状态/来源和最近验证时间；macOS 注册会从卷的 `ParentWholeDisk` 再查询整盘 `diskutil -plist`，不再将 `disk4s2` 一类 `DeviceIdentifier` 当作序列号。只有硬件序列号或整盘 Media UUID 的 `verified` 身份可进入物理设备安全计数；整盘标识仅为 `inferred`，旧数据和无法确认的设备为 `unknown`，矛盾证据为 `conflict`。重复报告/CSV 显式输出 verified 与 unknown/unverified 数量，清理阈值只计 verified。旧 schema 的卷/分区 UUID 回填不再自动升级为 verified。Rust 质量门（7 单元、14 集成）与 Swift 3 项测试均通过。
 - Phase 12.3：严格清理计划会先刷新卷在线状态，并对候选删除副本和每个剩余独立 storage object 的代表路径执行元数据/可选完整 BLAKE3 验证；本任务缓存同一 `file_copy_id`，不会重复完整哈希。所有阈值只基于验证成功的代表副本重新计算，且物理设备仍只计 `verified` 整盘身份。计划 JSON 新增验证协议版本、完成/阻止/验证计数、取消预留字段、剩余候选/成功/失败副本、验证后各类计数、失败原因和物理身份警告。必要副本的失败会阻止计划；候选自身的 stale 则标明 `stale`。新增破坏未重扫的第三副本回归覆盖；Rust 质量门（7 单元、15 集成）与 Swift 3 项测试均通过。
 - Phase 12.4：新增 Rust `TaskProgress`，扫描、完整哈希、验证和清理计划的每条 JSONL `progress` 事件统一包含 files/groups/bytes/current path 字段；`JsonlTask` 以“100 个文件、300ms 或组阶段”节流，扫描在 JSONL 模式以最多 100 个已提交文件批次刷新。完整哈希/验证/清理计划接入实时回调，stdout 保持纯 JSONL。Swift 模型同步字段，明确拒绝非 v1 协议，任务事件最多保留 500 条；任务页按操作展示相应字段且缺失值显示“—”。新增 205 文件完整哈希实时事件测试与 Swift 协议/容量测试。Rust 质量门（7 单元、16 集成）与 Swift 5 项测试均通过。
+- Phase 12.5：新增 `TaskRunGuard`，所有 JSONL 长任务由 guard 创建并统一结束；异常提前返回时 Drop 会把记录保守标为 `abandoned`。数据库每次打开都会把遗留 `running` 任务改为 `abandoned` 并写明恢复原因，已结束任务不受影响。扫描、完整哈希、验证和清理计划都使用同一个 SIGINT 标志；验证中断以 `interrupted` 正常结束。严格清理计划支持取消、标记未完成项、且 CLI 取消时绝不写最终输出。计划 JSON 先写同目录临时文件、`sync_all` 后原子 rename；失败会删除临时文件。Swift 任务控制器能识别 Rust `interrupted` 终态。新增旧运行任务恢复和 guard Drop 回归测试；Rust 质量门（7 单元、18 集成）与 Swift 5 项测试均通过。
 
 ## 待完成
 
-- Phase 12.5：任务守卫、取消与异常恢复。
 - Phase 12.6：Swift 清理任务上下文绑定。
 - Phase 12.7：迁移备份、完整性检查与恢复提示。
 - Phase 12.8：重复报告的流式大数据输出。
@@ -59,7 +59,7 @@ Phase 12.4（统一 JSONL 长任务进度）已完成；下一步是 Phase 12.5�
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 - Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 - Phase 11：当前 Bundle 为未签名 Debug 构建，尚未做 Developer ID 签名、公证或 dmg/pkg 发布；Universal 2 只保留了构建扩展说明，尚未实际合并 x86_64 二进制。GitHub Actions 会在推送本提交后验证 macOS 环境。
-- Phase 12.4：JSONL 进度已统一，但 Rust 任务结束仍依赖各命令手工写入 `complete`/`fail`；SIGINT 的任务守卫、旧 running 状态恢复和清理输出原子写入仍由 Phase 12.5 收口。
+- Phase 12.5：任务状态、取消和原子输出已收口；Swift 仍使用全局 cleanup 输出路径，必须在 Phase 12.6 绑定本地/远端 task ID，避免串任务读取文件。
 
 ## 发布记录
 
