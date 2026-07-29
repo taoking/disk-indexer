@@ -1,0 +1,146 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* DiskIndexerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* DiskIndexerApp.swift */; };
+		A10000000000000000000002 /* DiskIndexerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* DiskIndexerModels.swift */; };
+		A10000000000000000000003 /* RustCommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* RustCommandRunner.swift */; };
+		A10000000000000000000004 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* AppState.swift */; };
+		A10000000000000000000005 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* RootView.swift */; };
+		A10000000000000000000006 /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* OverviewView.swift */; };
+		A10000000000000000000007 /* VolumesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* VolumesView.swift */; };
+		A10000000000000000000008 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* SettingsView.swift */; };
+		A10000000000000000000009 /* DiskIndexerAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* DiskIndexerAppTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A30000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A40000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000000000000000000001;
+			remoteInfo = DiskIndexerApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* DiskIndexerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskIndexerApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* DiskIndexerModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskIndexerModels.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* RustCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustCommandRunner.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		A20000000000000000000006 /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		A20000000000000000000007 /* VolumesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumesView.swift; sourceTree = "<group>"; };
+		A20000000000000000000008 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* DiskIndexerAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskIndexerAppTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000010 /* DiskIndexer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiskIndexer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000011 /* DiskIndexerAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiskIndexerAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A60000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A70000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A70000000000000000000002 /* DiskIndexerApp */,
+				A70000000000000000000007 /* DiskIndexerAppTests */,
+				A70000000000000000000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A70000000000000000000002 /* DiskIndexerApp */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* DiskIndexerApp.swift */,
+				A70000000000000000000003 /* Models */,
+				A70000000000000000000004 /* Services */,
+				A70000000000000000000005 /* ViewModels */,
+				A70000000000000000000006 /* Views */,
+			);
+			path = DiskIndexerApp;
+			sourceTree = "<group>";
+		};
+		A70000000000000000000003 /* Models */ = {isa = PBXGroup; children = (A20000000000000000000002 /* DiskIndexerModels.swift */,); path = Models; sourceTree = "<group>"; };
+		A70000000000000000000004 /* Services */ = {isa = PBXGroup; children = (A20000000000000000000003 /* RustCommandRunner.swift */,); path = Services; sourceTree = "<group>"; };
+		A70000000000000000000005 /* ViewModels */ = {isa = PBXGroup; children = (A20000000000000000000004 /* AppState.swift */,); path = ViewModels; sourceTree = "<group>"; };
+		A70000000000000000000006 /* Views */ = {isa = PBXGroup; children = (A20000000000000000000005 /* RootView.swift */, A20000000000000000000006 /* OverviewView.swift */, A20000000000000000000007 /* VolumesView.swift */, A20000000000000000000008 /* SettingsView.swift */,); path = Views; sourceTree = "<group>"; };
+		A70000000000000000000007 /* DiskIndexerAppTests */ = {isa = PBXGroup; children = (A20000000000000000000009 /* DiskIndexerAppTests.swift */,); path = DiskIndexerApp/Tests; sourceTree = "<group>"; };
+		A70000000000000000000008 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000010 /* DiskIndexer.app */, A20000000000000000000011 /* DiskIndexerAppTests.xctest */,); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* DiskIndexerApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXNativeTarget "DiskIndexerApp" */;
+			buildPhases = (A90000000000000000000001 /* Sources */, A60000000000000000000001 /* Frameworks */,);
+			buildRules = ();
+			dependencies = ();
+			name = DiskIndexerApp;
+			productName = DiskIndexerApp;
+			productReference = A20000000000000000000010 /* DiskIndexer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A50000000000000000000002 /* DiskIndexerAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000002 /* Build configuration list for PBXNativeTarget "DiskIndexerAppTests" */;
+			buildPhases = (A90000000000000000000002 /* Sources */, A60000000000000000000002 /* Frameworks */,);
+			buildRules = ();
+			dependencies = (A30000000000000000000002 /* PBXTargetDependency */,);
+			name = DiskIndexerAppTests;
+			productName = DiskIndexerAppTests;
+			productReference = A20000000000000000000011 /* DiskIndexerAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A40000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = { LastUpgradeCheck = 2600; TargetAttributes = { A50000000000000000000001 = { CreatedOnToolsVersion = 26.0; }; A50000000000000000000002 = { CreatedOnToolsVersion = 26.0; TestTargetID = A50000000000000000000001; }; }; };
+			buildConfigurationList = A80000000000000000000003 /* Build configuration list for PBXProject "DiskIndexerApp" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = A70000000000000000000001;
+			productRefGroup = A70000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A50000000000000000000001 /* DiskIndexerApp */, A50000000000000000000002 /* DiskIndexerAppTests */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A90000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* DiskIndexerApp.swift in Sources */, A10000000000000000000002 /* DiskIndexerModels.swift in Sources */, A10000000000000000000003 /* RustCommandRunner.swift in Sources */, A10000000000000000000004 /* AppState.swift in Sources */, A10000000000000000000005 /* RootView.swift in Sources */, A10000000000000000000006 /* OverviewView.swift in Sources */, A10000000000000000000007 /* VolumesView.swift in Sources */, A10000000000000000000008 /* SettingsView.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A90000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* DiskIndexerAppTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A30000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000001 /* DiskIndexerApp */; targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AA00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; SWIFT_STRICT_CONCURRENCY = minimal; }; name = Debug; };
+		AA00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 6.0; SWIFT_STRICT_CONCURRENCY = minimal; }; name = Release; };
+		AA00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 6.0; }; name = Debug; };
+		AA00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 6.0; }; name = Release; };
+		AA00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskIndexer.app/Contents/MacOS/DiskIndexer"; }; name = Debug; };
+		AA00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 6.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskIndexer.app/Contents/MacOS/DiskIndexer"; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A80000000000000000000001 /* Build configuration list for PBXNativeTarget "DiskIndexerApp" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000003 /* Debug */, AA00000000000000000000004 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A80000000000000000000002 /* Build configuration list for PBXNativeTarget "DiskIndexerAppTests" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000005 /* Debug */, AA00000000000000000000006 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A80000000000000000000003 /* Build configuration list for PBXProject "DiskIndexerApp" */ = {isa = XCConfigurationList; buildConfigurations = (AA00000000000000000000001 /* Debug */, AA00000000000000000000002 /* Release */,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A40000000000000000000001 /* Project object */;
+}

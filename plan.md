@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 10.1（移除浏览器 UI）已完成；下一步是 Phase 10.2（SwiftUI App 基础）。本轮目标是以 macOS 原生 App 完全替代浏览器 UI。
+Phase 10.2（SwiftUI App 基础）已完成；下一步是 Phase 10.3（原生业务页面与任务控制）。本轮目标是以 macOS 原生 App 完全替代浏览器 UI。
 
 ## 已完成
 
@@ -21,10 +21,10 @@ Phase 10.1（移除浏览器 UI）已完成；下一步是 Phase 10.2（SwiftUI 
 - Phase 9.3：新增 `0003_hash_report_safety`。`lookup` 先比较大小、mtime 纳秒、inode、device ID；缓存过期时返回 `cache_stale` 而不是精确命中，`--full-hash` 才重新计算。扫描写入 storage object / hard-link 分组键；重复报告分开统计路径、独立存储对象、逻辑卷和物理设备。清理计划默认 `candidate_unverified`，可用元数据/完整哈希严格验证得到 `verified_candidate`，硬链接、状态异常、存储对象或物理设备数量不足一律 `blocked`。自动化覆盖 stale、硬链接、状态过滤和清理验证。
 - Phase 9.4：新增 `0004_task_protocol_and_paging` 和 `task_runs`。哈希补齐、卷验证、候选哈希和重复内容查询改用 `id > after_id` keyset 分页，默认查询页 1000、写入批 500；新增 `--jsonl-progress`、任务历史和 SIGINT 安全停止。JSONL stdout 只写机器事件，stderr 保留诊断。自动化覆盖 10 万条模拟文件的分页无遗漏和 JSONL 纯事件输出。
 - Phase 10.1：完全删除 `disk-indexer ui`、`src/ui.rs`、静态页面、Axum/Tokio/WebBrowser/Tower 依赖与所有端口文档；CLI 集成测试断言 `ui` 子命令不可用，依赖树不再包含这些组件。
+- Phase 10.2：新增 Apple Silicon 优先、macOS 14+ 的 SwiftUI Xcode 项目和独立单元测试；实现概览、硬盘注册、设置页，以及通过 `Bundle.main` 定位内置 Rust CLI 的 `Process.arguments` 调用边界。构建脚本会将 release `disk-indexer` 复制到 `DiskIndexer.app/Contents/Resources/`；同步读取 stdout/stderr 防止大输出管道阻塞。未引入 PATH、shell、HTTP、浏览器或端口。
 
 ## 待完成
 
-- Phase 10.2：SwiftUI App Shell、内置 Rust CLI、概览/硬盘/设置页。
 - Phase 10.3：扫描任务、重复文件、查询、清理计划和日志页。
 - Phase 11：原生 App 测试、CI、Release App Bundle 与最终验收。
 
@@ -45,6 +45,7 @@ Phase 10.1（移除浏览器 UI）已完成；下一步是 Phase 10.2（SwiftUI 
 - 扫描 `--resume` 通过已持久化元数据和幂等增量扫描恢复，不保存脆弱的目录遍历栈。
 - Phase 9.1 基线：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 已于 2026-07-29 通过（9 单元测试、3 集成测试）；当前尚无 Swift/Xcode 项目，因此 Swift build/test 门在本阶段不适用。Xcode 26.6 和 Swift 6.3.3 已验证可用。
 - Phase 9.2 的 CLI 冲突返回是安全状态而不是异常；调用方必须检查 `volume` 是否为 null/缺失并引导用户先审核冲突。
+- Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 
 ## 发布记录
 
