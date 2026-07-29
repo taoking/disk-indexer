@@ -53,25 +53,7 @@ disk-indexer volume resolve --conflict 12 --as-new-volume --role local_backup
 disk-indexer volume relink --volume 3 --path /Volumes/Photos
 ```
 
-## 3. 使用浏览器 UI
-
-```bash
-disk-indexer ui
-```
-
-命令启动 `http://127.0.0.1:48152` 并尝试打开默认浏览器。可以使用 `--port` 指定端口、`--no-open` 禁止自动打开。关闭终端或按 Ctrl+C 即停止 UI。
-
-页面操作顺序：
-
-1. 在“注册卷”输入卷根路径并选择角色。
-2. 在“扫描与索引”输入同一路径；默认是保守增量扫描。
-3. 勾选“扫描时补齐完整哈希”只适合小卷或已确认愿意接受更多顺序读取的场景；“只扫描元数据”则不读取内容。
-4. 在“重复内容展示”检查卷角色、状态和副本数。
-5. 填写目标卷 ID、保留卷 ID 与最少在线副本数，生成只读清理计划预览。
-
-UI 严格监听 `127.0.0.1`，没有认证、外网监听、云同步或遥测。不要自行将端口转发到局域网或公网；索引内容可泄露文件名和目录结构。
-
-## 4. CLI 参考
+## 3. CLI 参考
 
 ```bash
 # 卷
@@ -117,7 +99,7 @@ disk-indexer tasks --json
 
 如果 `lookup` 返回 `cache_stale`、`metadata_matches_index: false` 或 `requires_rehash: true`，文件的大小、修改时间、inode 或设备号已与索引不符。工具不会复用旧完整哈希，也不会显示精确命中；使用 `lookup <path> --full-hash` 重新计算当前文件。
 
-## 5. 清理计划如何阅读
+## 4. 清理计划如何阅读
 
 `cleanup plan` 默认产生的 `candidate_unverified` 不是可直接执行的删除指令。它只代表目标副本当前在线、指定保留卷有在线可信副本，且移除目标路径后在线独立存储对象数量满足阈值。需要在生成时重新校验文件，可使用：
 
@@ -144,10 +126,8 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 | 现象 | 处理方式 |
 | --- | --- |
 | 数据库被占用 | 稍后重试；数据库已配置 WAL 和 busy timeout。 |
-| UI 无法启动 | 检查端口占用，换用 `disk-indexer ui --port 48153`。 |
 | 卷身份冲突 | 不要复制 `.disk-indexer-volume-id`；保留原卷标记并为副本生成新标记。 |
 | 找不到重复 | 普通扫描可能尚未计算完整哈希；运行 `hash complete --volume <id>`。 |
-| UI 没有显示离线卷 | 刷新页面；概览请求会重新检查每个已知挂载路径。 |
 
 ## 8. 性能检查
 

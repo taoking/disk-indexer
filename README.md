@@ -1,6 +1,6 @@
 # Disk Indexer
 
-`disk-indexer` 是一个本地运行的多硬盘文件资产索引工具。它把文件元数据、抽样指纹和可信完整 BLAKE3 哈希保存在 SQLite 中，以便在硬盘离线时仍能查询历史副本，并识别字节完全相同的文件。项目提供 CLI 与仅本机可访问的浏览器 UI。
+`disk-indexer` 是一个本地运行的多硬盘文件资产索引工具。它把文件元数据、抽样指纹和可信完整 BLAKE3 哈希保存在 SQLite 中，以便在硬盘离线时仍能查询历史副本，并识别字节完全相同的文件。项目提供 CLI，并为 macOS 原生 App 提供本地 JSON/JSONL 子进程协议。
 
 它的目标是帮助人工整理长期重复备份，不是自动删除工具。
 
@@ -41,7 +41,6 @@ disk-indexer lookup /Volumes/NewDisk/IMG_0001.RAW --full-hash
 disk-indexer verify --volume 1 --full-hash
 disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
   --min-remaining-copies 2 --output cleanup-plan.json
-disk-indexer ui
 ```
 
 ### 卷身份冲突
@@ -60,19 +59,7 @@ disk-indexer volume relink --volume 3 --path /Volumes/Photos
 
 首次扫描建议先逐卷运行普通 `scan`，让工具只对同大小候选读取内容；需要“任意新文件都可快速精确比对”时，再分批运行 `hash complete --volume <id>`。
 
-## 本机 UI 与展示页
-
-运行：
-
-```bash
-disk-indexer ui
-# 使用其他端口，或不自动启动浏览器
-disk-indexer ui --port 48153 --no-open
-```
-
-页面默认打开 `http://127.0.0.1:48152`，可展示卷在线状态、可信重复组和理论可释放空间，并可注册卷、启动扫描、补齐完整哈希及预览清理计划。它**只绑定本机回环地址**，不会上传文件路径、哈希或数据库；页面和 API 都没有删除或移动文件的能力。按 Ctrl+C 可关闭服务。
-
-详尽的首次使用、命令参数、UI 操作顺序、恢复与故障排查见 [docs/usage.md](docs/usage.md)。展示页面源文件是 [ui/index.html](ui/index.html)。
+详尽的首次使用、命令参数、JSONL 任务协议、恢复与故障排查见 [docs/usage.md](docs/usage.md)。macOS 原生 App 将通过内置 CLI 子进程调用这些协议，不启动浏览器或本地 HTTP 服务。
 
 ## 安全限制
 
@@ -88,6 +75,6 @@ disk-indexer ui --port 48153 --no-open
 
 ## 当前未实现
 
-永久删除、移入废纸篓、隔离区执行、相似照片/视频识别、EXIF 分析、RAW/JPEG 关联、压缩包内部去重、云端/NAS/远程 Web 服务和实时 FSEvents 监听均不在本阶段范围内。当前 UI 仅是本机回环地址上的操作界面。
+永久删除、移入废纸篓、隔离区执行、相似照片/视频识别、EXIF 分析、RAW/JPEG 关联、压缩包内部去重、云端/NAS/远程服务和实时 FSEvents 监听均不在本阶段范围内。
 
 更多设计与验收说明见 [docs](docs/architecture.md)。

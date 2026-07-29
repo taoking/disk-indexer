@@ -471,6 +471,19 @@ fn jsonl_scan_protocol_has_only_valid_events_and_persists_task_history() {
 }
 
 #[test]
+fn browser_ui_command_is_not_available() {
+    use assert_cmd::Command;
+
+    let output = Command::cargo_bin("disk-indexer")
+        .expect("binary")
+        .arg("ui")
+        .output()
+        .expect("run CLI");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
+}
+
+#[test]
 fn lookup_marks_changed_cached_hash_as_stale_until_explicit_rehash() {
     let temp = tempdir().expect("temporary root");
     let volume_path = temp.path().join("volume");

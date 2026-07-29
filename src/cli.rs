@@ -20,7 +20,6 @@ use crate::report::{
 use crate::scanner::{
     ScanOptions, complete_hashes, complete_hashes_with_cancel, interrupt_flag, scan,
 };
-use crate::ui::run_local_ui;
 use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
 
 #[derive(Debug, Parser)]
@@ -66,8 +65,6 @@ enum Command {
         #[command(subcommand)]
         command: CleanupCommand,
     },
-    /// 启动仅本机可访问的浏览器操作界面
-    Ui(UiArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -252,16 +249,6 @@ struct CleanupPlanArgs {
     output: PathBuf,
 }
 
-#[derive(Debug, Args)]
-struct UiArgs {
-    /// 本机监听端口，仅绑定 127.0.0.1
-    #[arg(long, default_value_t = 48152)]
-    port: u16,
-    /// 不自动打开默认浏览器
-    #[arg(long)]
-    no_open: bool,
-}
-
 pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
     tracing_subscriber::fmt()
@@ -373,7 +360,6 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         },
-        Command::Ui(args) => run_local_ui(&config, args.port, !args.no_open)?,
     }
     Ok(())
 }

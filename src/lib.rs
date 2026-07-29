@@ -9,6 +9,5 @@ pub mod model;
 pub mod protocol;
 pub mod report;
 pub mod scanner;
-pub mod ui;
 pub mod util;
 pub mod volume;

@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 9.4（分页和机器协议）已完成；下一步是 Phase 10.1（移除浏览器 UI）。本轮目标是先解决 P0 文件身份和缓存安全问题，再以 SwiftUI 原生 App 完全替代浏览器 UI。
+Phase 10.1（移除浏览器 UI）已完成；下一步是 Phase 10.2（SwiftUI App 基础）。本轮目标是以 macOS 原生 App 完全替代浏览器 UI。
 
 ## 已完成
 
@@ -20,10 +20,10 @@ Phase 9.4（分页和机器协议）已完成；下一步是 Phase 10.1（移除
 - Phase 9.2：新增 `0002_volume_identity_safety`；引入 `physical_devices`、`volumes.physical_device_id`、`identity_state`、冲突/卷审计表和旧历史回填。相同 marker 在稳定身份冲突或无法证明一致时返回 `possible_clone`，即使原卷离线也绝不覆盖；新增 `volume conflicts`、`volume resolve --as-new-volume` 和受稳定身份约束的 `volume relink`。自动化覆盖离线克隆、稳定重挂载和旧数据库迁移。
 - Phase 9.3：新增 `0003_hash_report_safety`。`lookup` 先比较大小、mtime 纳秒、inode、device ID；缓存过期时返回 `cache_stale` 而不是精确命中，`--full-hash` 才重新计算。扫描写入 storage object / hard-link 分组键；重复报告分开统计路径、独立存储对象、逻辑卷和物理设备。清理计划默认 `candidate_unverified`，可用元数据/完整哈希严格验证得到 `verified_candidate`，硬链接、状态异常、存储对象或物理设备数量不足一律 `blocked`。自动化覆盖 stale、硬链接、状态过滤和清理验证。
 - Phase 9.4：新增 `0004_task_protocol_and_paging` 和 `task_runs`。哈希补齐、卷验证、候选哈希和重复内容查询改用 `id > after_id` keyset 分页，默认查询页 1000、写入批 500；新增 `--jsonl-progress`、任务历史和 SIGINT 安全停止。JSONL stdout 只写机器事件，stderr 保留诊断。自动化覆盖 10 万条模拟文件的分页无遗漏和 JSONL 纯事件输出。
+- Phase 10.1：完全删除 `disk-indexer ui`、`src/ui.rs`、静态页面、Axum/Tokio/WebBrowser/Tower 依赖与所有端口文档；CLI 集成测试断言 `ui` 子命令不可用，依赖树不再包含这些组件。
 
 ## 待完成
 
-- Phase 10.1：完全移除浏览器 UI、HTTP 服务和端口监听。
 - Phase 10.2：SwiftUI App Shell、内置 Rust CLI、概览/硬盘/设置页。
 - Phase 10.3：扫描任务、重复文件、查询、清理计划和日志页。
 - Phase 11：原生 App 测试、CI、Release App Bundle 与最终验收。
@@ -37,16 +37,14 @@ Phase 9.4（分页和机器协议）已完成；下一步是 Phase 10.1（移除
 - 长任务使用版本化 JSONL，并把最终状态写入 `task_runs`；默认分页不使用 OFFSET。当前重复报告仍为兼容 CLI 汇总为内存中的 JSON/文本结果，原生 App 将在 Phase 10 使用分页 API 分段加载。
 - 完整 BLAKE3 且文件大小一致才构成重复组；抽样哈希只能缩小候选集合。
 - CLI 不含删除或移动文件代码路径；清理功能只输出 JSON 计划。
-- UI 用 `axum` 提供静态展示页及操作 API，但严格绑定 `127.0.0.1`；每个请求使用短生命周期 SQLite 连接，避免跨异步任务共享连接。
 - 本轮原生 App 通过 App Bundle 内置 `disk-indexer` 子进程和稳定 JSON/JSONL 协议调用 Rust，不引入 Rust/Swift FFI 或网络协议。
 
 ## 已知风险
 
 - 在只读卷且系统未提供稳定卷 UUID/序列号时，回退标识仍会纳入路径避免误合并，跨重挂载稳定性有限。
 - 扫描 `--resume` 通过已持久化元数据和幂等增量扫描恢复，不保存脆弱的目录遍历栈。
-- 本机 UI 没有认证机制，因此绝不可通过端口转发或反向代理暴露到局域网/公网。
 - Phase 9.1 基线：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 已于 2026-07-29 通过（9 单元测试、3 集成测试）；当前尚无 Swift/Xcode 项目，因此 Swift build/test 门在本阶段不适用。Xcode 26.6 和 Swift 6.3.3 已验证可用。
-- Phase 9.2 的 CLI 冲突返回是安全状态而不是异常；调用方必须检查 `volume` 是否为 null/缺失并引导用户先审核冲突。Phase 10 移除浏览器 UI 前，旧 UI 仍在编译，但已同步适配为不会扫描 `possible_clone`。
+- Phase 9.2 的 CLI 冲突返回是安全状态而不是异常；调用方必须检查 `volume` 是否为 null/缺失并引导用户先审核冲突。
 
 ## 发布记录
 
@@ -55,6 +53,6 @@ Phase 9.4（分页和机器协议）已完成；下一步是 Phase 10.1（移除
 - 首次提交：`d3e63a4 发布本地磁盘索引工具与 UI`
 - 已加入 macOS GitHub Actions 质量门：格式化、Clippy 和测试。
 
-## GUI 后续计划
+## 原生 App 后续计划
 
-`disk_indexer` 库公开数据库、扫描和报告服务；未来 SwiftUI 可直接调用 JSON/库层接口，而不复用 CLI 输出解析。
+SwiftUI App 将通过 App Bundle 内置 CLI 和 JSON/JSONL 协议调用 Rust 核心，不复用终端文本、不启动 HTTP 服务，也不直接读写 SQLite 业务表。

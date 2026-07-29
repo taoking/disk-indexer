@@ -34,12 +34,10 @@ disk-indexer --db "$root/index.db" cleanup plan --target-volume 2 --keep-volume 
 
 预期重复组有 3 个副本；同大小不同内容不在组内；第二次扫描 `volume-a` 的 `metadata_reused_count` 为 2；清理计划只写 JSON，绝不改动源文件。将 `volume-c` 改名以模拟拔盘后，`duplicates` 仍显示该副本为 `offline`，不是 `missing`。自动化版本位于 `tests/integration.rs`。
 
-本机 UI 验收：
+长任务协议验收：
 
 ```bash
-disk-indexer --db "$root/index.db" ui --no-open --port 48152
-curl --fail http://127.0.0.1:48152/
-curl --fail http://127.0.0.1:48152/api/overview
+disk-indexer --db "$root/index.db" scan "$root/volume-a" --metadata-only --jsonl-progress
 ```
 
-页面必须解释 `127.0.0.1` 安全边界，概览 API 必须返回 schema 版本和卷数据。UI 路由单测位于 `src/ui.rs`；按 Ctrl+C 应优雅停止服务。
+stdout 每一行必须是合法 JSON，包含相同的 `task_id`，并以 `task_completed` 结束；不会启动浏览器或监听网络端口。
