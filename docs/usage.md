@@ -102,6 +102,19 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 
 `--json` 适用于脚本或未来 GUI；进度和警告不混入 JSON 标准输出。`duplicates` 的 CSV 将每个副本展开为一行。`lookup --full-hash` 会对路径当前的文件执行精确完整哈希；未传该参数时，抽样匹配只能作为候选提示。
 
+长任务供原生 App 或脚本消费时使用 `--jsonl-progress`。stdout 每行都是一个 JSON 事件，绝不混入普通提示文本；诊断日志仍写入 stderr。每个事件包含 `protocol_version`、`type`、`task_id`、`timestamp` 和 `operation`。可用操作：
+
+```bash
+disk-indexer scan /Volumes/Photos --jsonl-progress
+disk-indexer hash complete --volume 1 --jsonl-progress
+disk-indexer verify --volume 1 --full-hash --jsonl-progress
+disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
+  --output cleanup-plan.json --jsonl-progress
+disk-indexer tasks --json
+```
+
+扫描会在每个已提交数据库批次后输出进度。向子进程发送 SIGINT 时，扫描、完整哈希和卷验证会在安全检查点停止，任务记录状态为 `interrupted`；不要把强制终止作为常规取消方式。
+
 如果 `lookup` 返回 `cache_stale`、`metadata_matches_index: false` 或 `requires_rehash: true`，文件的大小、修改时间、inode 或设备号已与索引不符。工具不会复用旧完整哈希，也不会显示精确命中；使用 `lookup <path> --full-hash` 重新计算当前文件。
 
 ## 5. 清理计划如何阅读

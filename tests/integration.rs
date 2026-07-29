@@ -37,7 +37,7 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
 
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    assert_eq!(database.schema_version().expect("schema"), 3);
+    assert_eq!(database.schema_version().expect("schema"), 4);
     let a = registered(
         register_volume(
             &mut database,
@@ -359,13 +359,115 @@ fn migration_backfills_physical_device_for_existing_volume_history() {
 
     let config = Config::new(Some(database_path)).expect("config");
     let database = Database::open(&config).expect("migrate legacy database");
-    assert_eq!(database.schema_version().expect("schema version"), 3);
+    assert_eq!(database.schema_version().expect("schema version"), 4);
     let volume = database
         .volume_by_uid("legacy:volume")
         .expect("volume lookup")
         .expect("legacy volume");
     assert!(volume.physical_device_id.is_some());
     assert_eq!(volume.identity_state.as_str(), "verified");
+}
+
+#[test]
+fn keyset_paging_reads_large_volume_without_offset_or_duplicates() {
+    let temp = tempdir().expect("temporary root");
+    let database_path = temp.path().join("paged.db");
+    let config = Config::new(Some(database_path.clone())).expect("config");
+    drop(Database::open(&config).expect("initialize schema"));
+    let mut connection = rusqlite::Connection::open(&database_path).expect("open raw database");
+    let transaction = connection.transaction().expect("bulk transaction");
+    transaction
+        .execute(
+            "INSERT INTO volumes (
+                volume_uid, volume_name, filesystem, mount_path, mount_path_display, role, is_online,
+                physical_device_id, identity_state, first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES ('page-volume', 'page-volume', 'test', ?1, '/page-volume', 'unknown', 1,
+                       NULL, 'fallback', 't', 't', 't', 't')",
+            rusqlite::params![b"/page-volume".to_vec()],
+        )
+        .expect("insert volume");
+    let volume_id = transaction.last_insert_rowid();
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO file_copies (
+                volume_id, relative_path, relative_path_display, filename, filename_display, file_size, status,
+                first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?2, ?3, 1, 'present', 't', 't', 't', 't')",
+        )
+        .expect("prepare files");
+    for index in 0..100_000_u32 {
+        let name = format!("file-{index:06}");
+        insert
+            .execute(rusqlite::params![volume_id, name.as_bytes(), name])
+            .expect("insert simulated file");
+    }
+    drop(insert);
+    transaction.commit().expect("commit simulated files");
+    drop(connection);
+
+    let database = Database::open(&config).expect("open paged database");
+    let mut after_id = 0;
+    let mut count = 0usize;
+    loop {
+        let page = database
+            .files_for_volume_page(volume_id, after_id, 1_000)
+            .expect("page");
+        let Some(last) = page.last() else {
+            break;
+        };
+        assert!(page.windows(2).all(|window| window[0].id < window[1].id));
+        assert!(last.id > after_id);
+        after_id = last.id;
+        count = count.saturating_add(page.len());
+    }
+    assert_eq!(count, 100_000);
+}
+
+#[test]
+fn jsonl_scan_protocol_has_only_valid_events_and_persists_task_history() {
+    use assert_cmd::Command;
+
+    let temp = tempdir().expect("temporary root");
+    let volume_path = temp.path().join("volume");
+    fs::create_dir_all(&volume_path).expect("volume directory");
+    fs::write(volume_path.join("file"), b"contents").expect("file");
+    let database_path = temp.path().join("index.db");
+    let output = Command::cargo_bin("disk-indexer")
+        .expect("binary")
+        .args([
+            "--db",
+            database_path.to_string_lossy().as_ref(),
+            "scan",
+            volume_path.to_string_lossy().as_ref(),
+            "--metadata-only",
+            "--jsonl-progress",
+        ])
+        .output()
+        .expect("run JSONL scan");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = String::from_utf8(output.stdout)
+        .expect("utf8 JSONL")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON line"))
+        .collect::<Vec<_>>();
+    assert!(events.len() >= 2);
+    assert_eq!(events.first().expect("start")["type"], "task_started");
+    assert_eq!(events.last().expect("end")["type"], "task_completed");
+    let task_id = events.first().expect("start")["task_id"].clone();
+    assert!(events.iter().all(|event| {
+        event["protocol_version"] == 1
+            && event["task_id"] == task_id
+            && event["timestamp"].is_string()
+    }));
+    let config = Config::new(Some(database_path)).expect("config");
+    let database = Database::open(&config).expect("open database");
+    let tasks = database.task_runs_page(0, 10).expect("task history");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["status"], "completed");
 }
 
 #[test]

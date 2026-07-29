@@ -6,6 +6,7 @@ pub mod db;
 pub mod duplicate;
 pub mod hashing;
 pub mod model;
+pub mod protocol;
 pub mod report;
 pub mod scanner;
 pub mod ui;

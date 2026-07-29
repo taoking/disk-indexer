@@ -38,57 +38,67 @@ pub fn duplicate_groups(
     filter: DuplicateFilter,
 ) -> Result<Vec<DuplicateGroup>> {
     let mut groups = Vec::new();
-    for (content_id, full_hash, file_size) in database.duplicate_content_ids(2, filter.min_size)? {
-        let records = database.records_by_content(content_id)?;
-        let copies = records
-            .iter()
-            .filter(|record| include_record(record, filter))
-            .map(copy_view)
-            .collect::<Vec<_>>();
-        if copies.len() < filter.min_copies {
-            continue;
+    let mut after_content_id = 0;
+    loop {
+        let content_page =
+            database.duplicate_content_ids_page(after_content_id, 2, filter.min_size, 1_000)?;
+        let Some(last) = content_page.last() else {
+            break;
+        };
+        after_content_id = last.0;
+        for (content_id, full_hash, file_size) in content_page {
+            let records = database.records_by_content(content_id)?;
+            let copies = records
+                .iter()
+                .filter(|record| include_record(record, filter))
+                .map(copy_view)
+                .collect::<Vec<_>>();
+            if copies.len() < filter.min_copies {
+                continue;
+            }
+            let online_storage_objects = copies
+                .iter()
+                .filter(|copy| copy.is_online && copy.status == "present")
+                .map(storage_object_identity)
+                .collect::<HashSet<_>>();
+            let storage_objects = copies
+                .iter()
+                .map(storage_object_identity)
+                .collect::<HashSet<_>>();
+            let logical_volumes = copies
+                .iter()
+                .map(|copy| copy.volume_id)
+                .collect::<HashSet<_>>();
+            let physical_devices = copies
+                .iter()
+                .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
+                .collect::<HashSet<_>>();
+            let offline_copies = copies
+                .iter()
+                .filter(|copy| copy.status == "offline_unverified")
+                .count();
+            let missing_copies = copies
+                .iter()
+                .filter(|copy| copy.status == "missing")
+                .count();
+            groups.push(DuplicateGroup {
+                full_hash,
+                file_size,
+                known_copies: copies.len(),
+                online_copies: online_storage_objects.len(),
+                offline_copies,
+                missing_copies,
+                path_count: copies.len(),
+                storage_object_count: storage_objects.len(),
+                logical_volume_count: logical_volumes.len(),
+                physical_device_count: physical_devices.len(),
+                theoretical_reclaimable_bytes: file_size.saturating_mul(
+                    u64::try_from(online_storage_objects.len().saturating_sub(1))
+                        .unwrap_or(u64::MAX),
+                ),
+                copies,
+            });
         }
-        let online_storage_objects = copies
-            .iter()
-            .filter(|copy| copy.is_online && copy.status == "present")
-            .map(storage_object_identity)
-            .collect::<HashSet<_>>();
-        let storage_objects = copies
-            .iter()
-            .map(storage_object_identity)
-            .collect::<HashSet<_>>();
-        let logical_volumes = copies
-            .iter()
-            .map(|copy| copy.volume_id)
-            .collect::<HashSet<_>>();
-        let physical_devices = copies
-            .iter()
-            .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
-            .collect::<HashSet<_>>();
-        let offline_copies = copies
-            .iter()
-            .filter(|copy| copy.status == "offline_unverified")
-            .count();
-        let missing_copies = copies
-            .iter()
-            .filter(|copy| copy.status == "missing")
-            .count();
-        groups.push(DuplicateGroup {
-            full_hash,
-            file_size,
-            known_copies: copies.len(),
-            online_copies: online_storage_objects.len(),
-            offline_copies,
-            missing_copies,
-            path_count: copies.len(),
-            storage_object_count: storage_objects.len(),
-            logical_volume_count: logical_volumes.len(),
-            physical_device_count: physical_devices.len(),
-            theoretical_reclaimable_bytes: file_size.saturating_mul(
-                u64::try_from(online_storage_objects.len().saturating_sub(1)).unwrap_or(u64::MAX),
-            ),
-            copies,
-        });
     }
     groups.sort_by(|left, right| {
         right

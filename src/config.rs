@@ -10,7 +10,10 @@ pub struct Config {
     pub database_path: PathBuf,
     pub sample_bytes: usize,
     pub read_buffer_bytes: usize,
+    /// 单次写入数据库的扫描元数据数量。
     pub batch_size: usize,
+    /// 所有大查询使用的 keyset 分页大小。
+    pub query_page_size: usize,
 }
 
 impl Config {
@@ -22,7 +25,8 @@ impl Config {
             database_path,
             sample_bytes: 256 * 1024,
             read_buffer_bytes: 1024 * 1024,
-            batch_size: 200,
+            batch_size: 500,
+            query_page_size: 1_000,
         })
     }
 }

@@ -1,6 +1,7 @@
 //! CLI 适配层：只处理参数、输出与退出状态，不承载索引业务逻辑。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -10,12 +11,15 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::duplicate::{DuplicateFilter, duplicate_groups, lookup, verify_record};
 use crate::model::VolumeRole;
+use crate::protocol::JsonlTask;
 use crate::report::{
     CleanupVerificationOptions, create_cleanup_plan_with_verification, duplicate_report,
     render_cleanup_plan_text, render_duplicates_text, render_lookup_text, write_cleanup_plan,
     write_csv,
 };
-use crate::scanner::{ScanOptions, complete_hashes, scan};
+use crate::scanner::{
+    ScanOptions, complete_hashes, complete_hashes_with_cancel, interrupt_flag, scan,
+};
 use crate::ui::run_local_ui;
 use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
 
@@ -55,6 +59,8 @@ enum Command {
     Duplicates(DuplicatesArgs),
     /// 只读验证数据库中的文件记录
     Verify(VerifyArgs),
+    /// 查看可供原生 App 恢复展示的任务历史
+    Tasks(TasksArgs),
     /// 生成只供人工审核的清理候选计划，不会删除文件
     Cleanup {
         #[command(subcommand)]
@@ -138,8 +144,11 @@ struct ScanCommand {
     excludes: Vec<String>,
     #[arg(long, default_value_t = 1)]
     max_readers: usize,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "jsonl_progress")]
     json: bool,
+    /// 使用稳定 JSON Lines 输出任务开始、持久化进度与结束事件
+    #[arg(long, conflicts_with = "json")]
+    jsonl_progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -162,8 +171,10 @@ enum HashCommand {
         volume: Option<i64>,
         #[arg(long)]
         all: bool,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "jsonl_progress")]
         json: bool,
+        #[arg(long, conflicts_with = "json")]
+        jsonl_progress: bool,
     },
 }
 
@@ -202,6 +213,18 @@ struct VerifyArgs {
     file_copy: Option<i64>,
     #[arg(long)]
     full_hash: bool,
+    #[arg(long)]
+    jsonl_progress: bool,
+}
+
+#[derive(Debug, Args)]
+struct TasksArgs {
+    #[arg(long, default_value_t = 0)]
+    after_id: i64,
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -223,6 +246,8 @@ struct CleanupPlanArgs {
     verify_metadata: bool,
     #[arg(long)]
     verify_full_hash: bool,
+    #[arg(long)]
+    jsonl_progress: bool,
     #[arg(long)]
     output: PathBuf,
 }
@@ -288,10 +313,28 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Verify(args) => run_verify(&mut database, &config, args)?,
+        Command::Tasks(args) => {
+            let tasks = database.task_runs_page(args.after_id, args.limit)?;
+            if args.json {
+                print_json(&tasks)?;
+            } else {
+                for task in tasks {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        task["id"], task["operation"], task["status"], task["started_at"]
+                    );
+                }
+            }
+        }
         Command::Cleanup { command } => match command {
             CleanupCommand::Plan(args) => {
                 database.refresh_volume_online_states()?;
-                let plan = create_cleanup_plan_with_verification(
+                let task = if args.jsonl_progress {
+                    Some(JsonlTask::start(&mut database, "cleanup_plan")?)
+                } else {
+                    None
+                };
+                let plan_result = create_cleanup_plan_with_verification(
                     &mut database,
                     &config,
                     args.target_volume,
@@ -302,10 +345,32 @@ pub fn run(cli: Cli) -> Result<()> {
                         verify_metadata: args.verify_metadata || args.verify_full_hash,
                         verify_full_hash: args.verify_full_hash,
                     },
-                )?;
-                write_cleanup_plan(&args.output, &plan)?;
-                print!("{}", render_cleanup_plan_text(&plan));
-                println!("计划文件: {}", args.output.display());
+                );
+                let plan = match plan_result {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        if let Some(task) = &task {
+                            task.fail(&mut database, &error)?;
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = write_cleanup_plan(&args.output, &plan) {
+                    if let Some(task) = &task {
+                        task.fail(&mut database, &error)?;
+                    }
+                    return Err(error);
+                }
+                if let Some(task) = &task {
+                    task.complete(
+                        &mut database,
+                        "completed",
+                        &serde_json::json!({"plan": plan, "output": args.output}),
+                    )?;
+                } else {
+                    print!("{}", render_cleanup_plan_text(&plan));
+                    println!("计划文件: {}", args.output.display());
+                }
             }
         },
         Command::Ui(args) => run_local_ui(&config, args.port, !args.no_open)?,
@@ -470,6 +535,9 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
         if command.root.is_some() {
             bail!("scan 历史子命令不能同时指定扫描路径");
         }
+        if command.jsonl_progress {
+            bail!("scan 历史查询不支持 --jsonl-progress");
+        }
         return match action {
             ScanAction::List { json } => {
                 let runs = database.scan_runs()?;
@@ -521,7 +589,27 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
     let volume = registration.volume.context(
         "扫描已停止：检测到 possible_clone；请先使用 volume conflicts 审核并 resolve 或 relink",
     )?;
-    let summary = scan(
+    let task = if command.jsonl_progress {
+        Some(Arc::new(JsonlTask::start(database, "scan")?))
+    } else {
+        None
+    };
+    let progress_callback = task.as_ref().map(|task| {
+        let task = Arc::clone(task);
+        Arc::new(
+            move |summary: &crate::model::ScanSummary, current_path: Option<&str>| {
+                task.progress(serde_json::json!({
+                    "files_seen": summary.discovered_count,
+                    "files_reused": summary.metadata_reused_count,
+                    "files_sampled": summary.sampled_count,
+                    "files_full_hashed": summary.full_hashed_count,
+                    "bytes_read": summary.bytes_read,
+                    "current_path": current_path,
+                }));
+            },
+        ) as crate::scanner::ScanProgressCallback
+    });
+    let summary_result = scan(
         database,
         config,
         &volume,
@@ -532,9 +620,21 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
             excludes: command.excludes,
             max_readers: command.max_readers,
             cancel_flag: None,
+            progress_callback,
         },
-    )?;
-    if command.json {
+    );
+    let summary = match summary_result {
+        Ok(summary) => summary,
+        Err(error) => {
+            if let Some(task) = &task {
+                task.fail(database, &error)?;
+            }
+            return Err(error);
+        }
+    };
+    if let Some(task) = &task {
+        task.complete(database, &summary.status, &summary)?;
+    } else if command.json {
         print_json(&summary)?;
     } else {
         println!(
@@ -555,19 +655,61 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
 
 fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> Result<()> {
     match command {
-        HashCommand::Complete { volume, all, json } => {
+        HashCommand::Complete {
+            volume,
+            all,
+            json,
+            jsonl_progress,
+        } => {
             if !all && volume.is_none() {
                 bail!("hash complete 必须指定 --volume <id> 或 --all");
             }
             database.refresh_volume_online_states()?;
-            let stats = complete_hashes(database, config, volume)?;
-            if json {
-                print_json(&serde_json::json!({
-                    "sampled": stats.sampled,
-                    "full_hashed": stats.full_hashed,
-                    "errors": stats.errors,
-                    "bytes_read": stats.bytes_read,
-                }))?;
+            let task = if jsonl_progress {
+                Some(JsonlTask::start(database, "hash_complete")?)
+            } else {
+                None
+            };
+            let cancel_flag = if task.is_some() {
+                let flag = interrupt_flag()?;
+                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                Some(flag)
+            } else {
+                None
+            };
+            let stats = match if let Some(cancel_flag) = cancel_flag.as_deref() {
+                complete_hashes_with_cancel(database, config, volume, Some(cancel_flag))
+            } else {
+                complete_hashes(database, config, volume)
+            } {
+                Ok(stats) => stats,
+                Err(error) => {
+                    if let Some(task) = &task {
+                        task.fail(database, &error)?;
+                    }
+                    return Err(error);
+                }
+            };
+            let summary = serde_json::json!({
+                "sampled": stats.sampled,
+                "full_hashed": stats.full_hashed,
+                "errors": stats.errors,
+                "bytes_read": stats.bytes_read,
+                "interrupted": stats.interrupted,
+            });
+            if let Some(task) = &task {
+                task.progress(summary.clone());
+                task.complete(
+                    database,
+                    if stats.interrupted {
+                        "interrupted"
+                    } else {
+                        "completed"
+                    },
+                    &summary,
+                )?;
+            } else if json {
+                print_json(&summary)?;
             } else {
                 println!(
                     "完整哈希完成：{} 个文件，读取 {} 字节，错误 {}",
@@ -580,27 +722,120 @@ fn run_hash(database: &mut Database, config: &Config, command: HashCommand) -> R
 }
 
 fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Result<()> {
-    let records = if let Some(id) = args.file_copy {
-        vec![
-            database
-                .file_record_by_id(id)?
-                .context("未找到文件副本记录")?,
-        ]
-    } else if let Some(volume_id) = args.volume {
-        database.files_for_volume(volume_id)?
-    } else {
+    if args.file_copy.is_none() && args.volume.is_none() {
         bail!("verify 必须指定 --volume <id> 或 --file-copy <id>");
+    }
+    let task = if args.jsonl_progress {
+        Some(JsonlTask::start(database, "verify")?)
+    } else {
+        None
+    };
+    let cancel_flag = if task.is_some() {
+        let flag = interrupt_flag()?;
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        Some(flag)
+    } else {
+        None
     };
     let mut failures = 0usize;
-    for record in records {
-        match verify_record(database, config, &record, args.full_hash) {
-            Ok(()) => println!(
-                "通过: {}:{}",
-                record.volume_name,
-                record.relative_path.display()
-            ),
-            Err(error) => {
-                failures = failures.saturating_add(1);
+    let mut verified = 0usize;
+    let mut interrupted = false;
+    if let Some(id) = args.file_copy {
+        let record = database
+            .file_record_by_id(id)?
+            .context("未找到文件副本记录")?;
+        verify_one(
+            database,
+            config,
+            &record,
+            args.full_hash,
+            task.as_ref(),
+            &mut verified,
+            &mut failures,
+        );
+    } else if let Some(volume_id) = args.volume {
+        let mut after_id = 0;
+        loop {
+            if cancel_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                interrupted = true;
+                break;
+            }
+            let records =
+                database.files_for_volume_page(volume_id, after_id, config.query_page_size)?;
+            let Some(last) = records.last() else {
+                break;
+            };
+            after_id = last.id;
+            for record in records {
+                if cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+                {
+                    interrupted = true;
+                    break;
+                }
+                verify_one(
+                    database,
+                    config,
+                    &record,
+                    args.full_hash,
+                    task.as_ref(),
+                    &mut verified,
+                    &mut failures,
+                );
+            }
+            if interrupted {
+                break;
+            }
+        }
+    }
+    let summary =
+        serde_json::json!({"verified": verified, "failures": failures, "interrupted": interrupted});
+    if let Some(task) = &task {
+        task.complete(
+            database,
+            if interrupted {
+                "interrupted"
+            } else if failures == 0 {
+                "completed"
+            } else {
+                "completed_with_errors"
+            },
+            &summary,
+        )?;
+    }
+    if failures > 0 {
+        bail!("验证失败：{failures} 个文件副本未通过");
+    }
+    Ok(())
+}
+
+fn verify_one(
+    database: &mut Database,
+    config: &Config,
+    record: &crate::model::FileRecord,
+    full_hash: bool,
+    task: Option<&JsonlTask>,
+    verified: &mut usize,
+    failures: &mut usize,
+) {
+    match verify_record(database, config, record, full_hash) {
+        Ok(()) => {
+            *verified = verified.saturating_add(1);
+            if task.is_none() {
+                println!(
+                    "通过: {}:{}",
+                    record.volume_name,
+                    record.relative_path.display()
+                );
+            }
+        }
+        Err(error) => {
+            *failures = failures.saturating_add(1);
+            if task.is_none() {
                 eprintln!(
                     "失败: {}:{}: {error:#}",
                     record.volume_name,
@@ -609,10 +844,9 @@ fn run_verify(database: &mut Database, config: &Config, args: VerifyArgs) -> Res
             }
         }
     }
-    if failures > 0 {
-        bail!("验证失败：{failures} 个文件副本未通过");
+    if let Some(task) = task {
+        task.progress(serde_json::json!({"verified": *verified, "failures": *failures}));
     }
-    Ok(())
 }
 
 fn volume_json(volume: &crate::model::Volume) -> serde_json::Value {

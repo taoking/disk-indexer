@@ -1,6 +1,6 @@
 //! 顺序、保守的文件系统扫描器。它不跟随符号链接，也不会在卷离线时标记缺失。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -17,7 +17,7 @@ use crate::model::{FileMetadata, FileRecord, ScanSummary, Volume};
 use crate::util::now;
 use crate::volume::{MARKER_FILE, file_metadata, metadata_still_matches};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScanOptions {
     pub full_hash: bool,
     pub metadata_only: bool,
@@ -26,7 +26,11 @@ pub struct ScanOptions {
     pub max_readers: usize,
     /// 供嵌入式调用方和测试取消扫描；CLI 使用 Ctrl+C 信号处理器。
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// 只报告已提交的扫描进度，避免把尚未持久化的数据展示为完成。
+    pub progress_callback: Option<ScanProgressCallback>,
 }
+
+pub type ScanProgressCallback = Arc<dyn Fn(&ScanSummary, Option<&str>) + Send + Sync>;
 
 impl Default for ScanOptions {
     fn default() -> Self {
@@ -37,6 +41,7 @@ impl Default for ScanOptions {
             excludes: Vec::new(),
             max_readers: 1,
             cancel_flag: None,
+            progress_callback: None,
         }
     }
 }
@@ -47,6 +52,7 @@ pub struct HashStats {
     pub full_hashed: u64,
     pub errors: u64,
     pub bytes_read: u64,
+    pub interrupted: bool,
 }
 
 pub fn scan(
@@ -152,6 +158,7 @@ pub fn scan(
                         pending_metadata.clear();
                         iteration_error = true;
                     } else {
+                        emit_progress(options, &summary, last_path.as_deref());
                         info!(
                             path = %path.display(), files = summary.discovered_count,
                             reused = summary.metadata_reused_count, "已批量持久化扫描进度"
@@ -181,6 +188,7 @@ pub fn scan(
                 .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
             iteration_error = true;
         }
+        emit_progress(options, &summary, last_path.as_deref());
     }
     if summary.status == "running" {
         if iteration_error {
@@ -196,7 +204,7 @@ pub fn scan(
     }
     if summary.status == "completed" && !options.metadata_only {
         let hashes = if options.full_hash {
-            complete_hashes(database, config, Some(volume.id))?
+            complete_hashes_with_cancel(database, config, Some(volume.id), Some(&cancelled))?
         } else {
             hash_duplicate_candidates(database, config)?
         };
@@ -204,11 +212,15 @@ pub fn scan(
         summary.full_hashed_count = hashes.full_hashed;
         summary.error_count = summary.error_count.saturating_add(hashes.errors);
         summary.bytes_read = hashes.bytes_read;
-        if hashes.errors > 0 {
+        if hashes.interrupted {
+            summary.status = "interrupted".to_owned();
+        } else if hashes.errors > 0 {
             summary.status = "completed_with_errors".to_owned();
         }
     }
-    let checkpoint = last_path.map(|path| json!({"last_path": path}).to_string());
+    let checkpoint = last_path
+        .as_ref()
+        .map(|path| json!({"last_path": path}).to_string());
     database.finish_scan_run(
         scan_id,
         &summary.status,
@@ -222,7 +234,14 @@ pub fn scan(
         summary.bytes_read,
         checkpoint.as_deref(),
     )?;
+    emit_progress(options, &summary, last_path.as_deref());
     Ok(summary)
+}
+
+fn emit_progress(options: &ScanOptions, summary: &ScanSummary, current_path: Option<&str>) {
+    if let Some(callback) = &options.progress_callback {
+        callback(summary, current_path);
+    }
 }
 
 fn persist_metadata_batch(
@@ -251,40 +270,34 @@ pub fn hash_duplicate_candidates(database: &mut Database, config: &Config) -> Re
         .into_iter()
         .map(|volume| (volume.id, volume))
         .collect::<HashMap<_, _>>();
-    let candidates = database.candidate_files()?;
-    for record in &candidates {
-        if record.sample_hash.is_none() {
-            hash_sample_for_record(database, config, record, &volumes, &mut stats)?;
+    let mut after_id = 0;
+    loop {
+        let candidates = database.candidate_files_page(after_id, config.query_page_size)?;
+        let Some(last) = candidates.last() else {
+            break;
+        };
+        after_id = last.id;
+        for record in &candidates {
+            if record.sample_hash.is_none() {
+                hash_sample_for_record(database, config, record, &volumes, &mut stats)?;
+            }
         }
     }
-    // 再读取一次数据库，确保新写入的 sample_hash 可以参与分组。
-    let candidates = database.candidate_files()?;
-    let matching_samples = candidates
-        .iter()
-        .filter_map(|record| {
-            record
-                .sample_hash
-                .as_ref()
-                .map(|hash| ((record.file_size, hash.clone()), record.id))
-        })
-        .fold(
-            HashMap::<(u64, String), Vec<i64>>::new(),
-            |mut groups, (key, id)| {
-                groups.entry(key).or_default().push(id);
-                groups
-            },
-        );
-    let eligible = matching_samples
-        .values()
-        .filter(|ids| ids.len() > 1)
-        .flat_map(|ids| ids.iter().copied())
-        .collect::<HashSet<_>>();
-    for record in candidates
-        .into_iter()
-        .filter(|record| eligible.contains(&record.id))
-    {
-        if record.full_hash.is_none() {
-            hash_full_for_record(database, config, &record, &volumes, &mut stats)?;
+    // 第二轮由 SQLite 逐条判断抽样哈希是否有匹配，避免构建全量 HashMap。
+    let mut after_id = 0;
+    loop {
+        let candidates = database.candidate_files_page(after_id, config.query_page_size)?;
+        let Some(last) = candidates.last() else {
+            break;
+        };
+        after_id = last.id;
+        for record in candidates {
+            if let Some(sample) = &record.sample_hash
+                && record.full_hash.is_none()
+                && database.sample_hash_has_duplicate(sample, record.file_size)?
+            {
+                hash_full_for_record(database, config, &record, &volumes, &mut stats)?;
+            }
         }
     }
     Ok(stats)
@@ -296,6 +309,15 @@ pub fn complete_hashes(
     config: &Config,
     only_volume: Option<i64>,
 ) -> Result<HashStats> {
+    complete_hashes_with_cancel(database, config, only_volume, None)
+}
+
+pub fn complete_hashes_with_cancel(
+    database: &mut Database,
+    config: &Config,
+    only_volume: Option<i64>,
+    cancel_flag: Option<&AtomicBool>,
+) -> Result<HashStats> {
     let mut stats = HashStats::default();
     let volumes = database
         .volumes()?
@@ -306,14 +328,34 @@ pub fn complete_hashes(
         .values()
         .filter(|volume| only_volume.is_none_or(|id| id == volume.id))
     {
+        if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            stats.interrupted = true;
+            break;
+        }
         if !volume.mount_path.is_dir() {
             database.set_volume_online(volume.id, false)?;
             continue;
         }
         database.set_volume_online(volume.id, true)?;
-        for record in database.files_for_volume(volume.id)? {
-            if record.full_hash.is_none() {
-                hash_full_for_record(database, config, &record, &volumes, &mut stats)?;
+        let mut after_id = 0;
+        loop {
+            let records =
+                database.files_for_volume_page(volume.id, after_id, config.query_page_size)?;
+            let Some(last) = records.last() else {
+                break;
+            };
+            after_id = last.id;
+            for record in records {
+                if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    stats.interrupted = true;
+                    break;
+                }
+                if record.full_hash.is_none() {
+                    hash_full_for_record(database, config, &record, &volumes, &mut stats)?;
+                }
+            }
+            if stats.interrupted {
+                break;
             }
         }
     }
@@ -499,7 +541,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pattern_index == pattern.len()
 }
 
-fn interrupt_flag() -> Result<Arc<AtomicBool>> {
+pub fn interrupt_flag() -> Result<Arc<AtomicBool>> {
     static FLAG: OnceLock<Result<Arc<AtomicBool>, String>> = OnceLock::new();
     match FLAG.get_or_init(|| {
         let signal = Arc::new(AtomicBool::new(false));

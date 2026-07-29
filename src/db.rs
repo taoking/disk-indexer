@@ -27,6 +27,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_hash_report_safety",
         include_str!("../migrations/0003_hash_report_safety.sql"),
     ),
+    (
+        "0004_task_protocol_and_paging",
+        include_str!("../migrations/0004_task_protocol_and_paging.sql"),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +238,71 @@ impl Database {
                     row.get(0)
                 })?;
         Ok(value)
+    }
+
+    pub fn create_task_run(&mut self, task_uid: &str, operation: &str) -> Result<i64> {
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO task_runs(task_uid, operation, status, started_at, created_at, updated_at)
+             VALUES (?1, ?2, 'running', ?3, ?3, ?3)",
+            params![task_uid, operation, timestamp],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn update_task_progress(
+        &mut self,
+        task_id: i64,
+        progress: &serde_json::Value,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE task_runs SET progress_json = ?1, updated_at = ?2 WHERE id = ?3",
+            params![progress.to_string(), now(), task_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_task_run(
+        &mut self,
+        task_id: i64,
+        status: &str,
+        summary: Option<&serde_json::Value>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let timestamp = now();
+        self.connection.execute(
+            "UPDATE task_runs SET status = ?1, finished_at = ?2, summary_json = ?3, error_message = ?4,
+                updated_at = ?2 WHERE id = ?5",
+            params![
+                status,
+                timestamp,
+                summary.map(serde_json::Value::to_string),
+                error_message,
+                task_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn task_runs_page(&self, after_id: i64, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let limit = checked_page_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, task_uid, operation, status, started_at, finished_at, progress_json, summary_json,
+                    error_message FROM task_runs WHERE id > ?1 ORDER BY id LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![after_id, limit], |row| {
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?, "task_uid": row.get::<_, String>(1)?,
+                    "operation": row.get::<_, String>(2)?, "status": row.get::<_, String>(3)?,
+                    "started_at": row.get::<_, String>(4)?, "finished_at": row.get::<_, Option<String>>(5)?,
+                    "progress": row.get::<_, Option<String>>(6)?.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()),
+                    "summary": row.get::<_, Option<String>>(7)?.and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok()),
+                    "error_message": row.get::<_, Option<String>>(8)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn upsert_volume(&mut self, input: VolumeUpsert<'_>) -> Result<Volume> {
@@ -821,6 +890,21 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn candidate_files_page(&self, after_id: i64, limit: usize) -> Result<Vec<FileRecord>> {
+        let limit = checked_page_limit(limit)?;
+        let sql = format!(
+            "{} AND f.id > ?1 AND f.status = 'present' AND v.is_online = 1 AND f.file_size IN (
+                SELECT file_size FROM file_copies WHERE status = 'present' GROUP BY file_size HAVING COUNT(*) > 1
+             ) ORDER BY f.id LIMIT ?2",
+            file_record_select("WHERE 1 = 1")
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        statement
+            .query_map(params![after_id, limit], row_to_file_record)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn files_for_volume(&self, volume_id: i64) -> Result<Vec<FileRecord>> {
         let sql = format!(
             "{} WHERE f.volume_id = ?1 AND f.status = 'present' ORDER BY f.id",
@@ -831,6 +915,34 @@ impl Database {
             .query_map([volume_id], row_to_file_record)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn files_for_volume_page(
+        &self,
+        volume_id: i64,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<FileRecord>> {
+        let limit = checked_page_limit(limit)?;
+        let sql = format!(
+            "{} WHERE f.volume_id = ?1 AND f.status = 'present' AND f.id > ?2 ORDER BY f.id LIMIT ?3",
+            file_record_select("")
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        statement
+            .query_map(params![volume_id, after_id, limit], row_to_file_record)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn sample_hash_has_duplicate(&self, sample_hash: &str, file_size: u64) -> Result<bool> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM file_copies f JOIN volumes v ON v.id = f.volume_id
+             WHERE f.sample_hash = ?1 AND f.file_size = ?2 AND f.status = 'present' AND v.is_online = 1",
+            params![sample_hash, file_size],
+            |row| row.get(0),
+        )?;
+        Ok(count > 1)
     }
 
     pub fn attach_hashes(
@@ -948,6 +1060,31 @@ impl Database {
             .query_map(params![min_size, threshold], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn duplicate_content_ids_page(
+        &self,
+        after_content_id: i64,
+        min_copies: usize,
+        min_size: u64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, u64)>> {
+        let threshold = i64::try_from(min_copies).context("副本数量超出 SQLite 整数范围")?;
+        let limit = checked_page_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT c.id, c.full_hash, c.file_size
+             FROM contents c JOIN file_copies f ON f.content_id = c.id
+             WHERE c.id > ?1 AND c.full_hash IS NOT NULL AND c.file_size >= ?2 AND f.status = 'present'
+             GROUP BY c.id HAVING COUNT(*) >= ?3
+             ORDER BY c.id LIMIT ?4",
+        )?;
+        statement
+            .query_map(
+                params![after_content_id, min_size, threshold, limit],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -1243,6 +1380,13 @@ fn row_to_file_record(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
         last_seen_at: row.get(22)?,
         last_verified_at: row.get(23)?,
     })
+}
+
+fn checked_page_limit(limit: usize) -> Result<i64> {
+    if limit == 0 {
+        bail!("分页大小必须大于 0");
+    }
+    i64::try_from(limit).context("分页大小超出 SQLite 整数范围")
 }
 
 pub fn safe_relative_path(root: &Path, path: &Path) -> Result<PathBuf> {
