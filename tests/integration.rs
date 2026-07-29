@@ -7,7 +7,7 @@ use disk_indexer::model::{Volume, VolumeRole};
 use disk_indexer::protocol::TaskRunGuard;
 use disk_indexer::report::{
     CleanupVerificationOptions, create_cleanup_plan, create_cleanup_plan_with_verification,
-    duplicate_report, write_csv,
+    duplicate_report, write_csv, write_csv_streaming, write_duplicates_jsonl,
 };
 use disk_indexer::scanner::{ScanOptions, scan};
 use disk_indexer::volume::{
@@ -148,6 +148,27 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
         fs::read_to_string(csv_path)
             .expect("read csv")
             .contains("full_hash")
+    );
+    let streaming_csv_path = temp.path().join("duplicates-streaming.csv");
+    write_csv_streaming(&database, &streaming_csv_path, DuplicateFilter::default())
+        .expect("stream csv");
+    assert_eq!(
+        fs::read_to_string(&streaming_csv_path)
+            .expect("read streaming csv")
+            .lines()
+            .count(),
+        4,
+        "一行表头加三个副本"
+    );
+    let mut jsonl = Vec::new();
+    write_duplicates_jsonl(&database, DuplicateFilter::default(), &mut jsonl)
+        .expect("stream JSONL");
+    assert_eq!(
+        String::from_utf8(jsonl)
+            .expect("JSONL utf8")
+            .lines()
+            .count(),
+        1
     );
 
     let second_scan =

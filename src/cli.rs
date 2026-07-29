@@ -18,7 +18,7 @@ use crate::report::{
     CleanupTaskControl, CleanupVerificationOptions,
     create_cleanup_plan_with_verification_and_progress_and_cancel, duplicate_report,
     render_cleanup_plan_text, render_duplicates_text, render_lookup_text,
-    write_cleanup_plan_atomically, write_csv,
+    write_cleanup_plan_atomically, write_csv_streaming, write_duplicates_jsonl,
 };
 use crate::scanner::{ScanOptions, complete_hashes_with_cancel_and_progress, interrupt_flag, scan};
 use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
@@ -201,6 +201,9 @@ struct DuplicatesArgs {
     include_missing: bool,
     #[arg(long)]
     json: bool,
+    /// 逐组输出 JSON Lines，适合大报告管道处理；不能与 --json/--csv/--page 混用。
+    #[arg(long, conflicts_with_all = ["json", "csv", "page"])]
+    jsonl: bool,
     #[arg(long)]
     csv: Option<PathBuf>,
     /// 使用内容 ID 游标返回一页重复组；供原生 App 分段加载。
@@ -304,6 +307,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 include_missing: args.include_missing,
                 volume_id: args.volume,
             };
+            if args.jsonl {
+                let stdout = std::io::stdout();
+                let mut output = stdout.lock();
+                write_duplicates_jsonl(&database, filter, &mut output)?;
+                return Ok(());
+            }
             if args.page {
                 if args.csv.is_some() {
                     bail!("--page 不能与 --csv 一起使用，以免写出不完整报告");
@@ -316,11 +325,12 @@ pub fn run(cli: Cli) -> Result<()> {
                 print_json(&page)?;
                 return Ok(());
             }
-            let groups = duplicate_groups(&database, filter)?;
             if let Some(path) = args.csv {
-                write_csv(&path, &groups)?;
+                write_csv_streaming(&database, &path, filter)?;
                 eprintln!("CSV 报告已写入: {}", path.display());
+                return Ok(());
             }
+            let groups = duplicate_groups(&database, filter)?;
             if args.json {
                 print_json(&duplicate_report(&database, &groups))?;
             } else {

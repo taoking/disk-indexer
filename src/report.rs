@@ -1,6 +1,7 @@
 //! 面向人和脚本的稳定报告及只读清理计划。
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -12,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::duplicate::{DuplicateFilter, duplicate_groups, verify_record};
+use crate::duplicate::{DuplicateFilter, duplicate_groups, duplicate_groups_page, verify_record};
 use crate::model::{
     CleanupPlan, CleanupPlanItem, DuplicateGroup, LookupResult, PhysicalDeviceIdentityState,
 };
@@ -132,6 +133,61 @@ pub fn write_csv(path: &Path, groups: &[DuplicateGroup]) -> Result<()> {
     let file =
         File::create(path).with_context(|| format!("无法创建 CSV 报告 {}", path.display()))?;
     let mut writer = csv::Writer::from_writer(file);
+    write_csv_header(&mut writer)?;
+    for group in groups {
+        write_csv_group(&mut writer, group)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// 以 keyset 分页直接写出 CSV，导出成本与一页重复组大小相关而非完整报告大小。
+pub fn write_csv_streaming(
+    database: &Database,
+    path: &Path,
+    filter: DuplicateFilter,
+) -> Result<()> {
+    let file =
+        File::create(path).with_context(|| format!("无法创建 CSV 报告 {}", path.display()))?;
+    let mut writer = csv::Writer::from_writer(file);
+    write_csv_header(&mut writer)?;
+    let mut cursor = 0;
+    loop {
+        let page = duplicate_groups_page(database, filter, cursor, 200)?;
+        for group in &page.groups {
+            write_csv_group(&mut writer, group)?;
+        }
+        let Some(next) = page.next_after_content_id else {
+            break;
+        };
+        cursor = next;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// 面向管道的逐组 JSON Lines 输出；不包裹数组，消费者可边读边处理。
+pub fn write_duplicates_jsonl<W: Write>(
+    database: &Database,
+    filter: DuplicateFilter,
+    output: &mut W,
+) -> Result<()> {
+    let mut cursor = 0;
+    loop {
+        let page = duplicate_groups_page(database, filter, cursor, 200)?;
+        for group in page.groups {
+            serde_json::to_writer(&mut *output, &group).context("无法编码重复组 JSONL")?;
+            output.write_all(b"\n").context("无法写入重复组 JSONL")?;
+        }
+        let Some(next) = page.next_after_content_id else {
+            break;
+        };
+        cursor = next;
+    }
+    output.flush().context("无法刷新重复组 JSONL")
+}
+
+fn write_csv_header<W: Write>(writer: &mut csv::Writer<W>) -> Result<()> {
     writer.write_record([
         "full_hash",
         "file_size",
@@ -151,32 +207,33 @@ pub fn write_csv(path: &Path, groups: &[DuplicateGroup]) -> Result<()> {
         "physical_device_id",
         "storage_object_key",
     ])?;
-    for group in groups {
-        for copy in &group.copies {
-            writer.write_record([
-                group.full_hash.as_str(),
-                &group.file_size.to_string(),
-                &group.known_copies.to_string(),
-                &group.path_count.to_string(),
-                &group.storage_object_count.to_string(),
-                &group.logical_volume_count.to_string(),
-                &group.physical_device_count.to_string(),
-                &group.verified_physical_device_count.to_string(),
-                &group.unknown_physical_device_count.to_string(),
-                &copy.volume_id.to_string(),
-                copy.volume.as_str(),
-                copy.role.as_str(),
-                copy.path.as_str(),
-                copy.status.as_str(),
-                &copy.is_online.to_string(),
-                &copy
-                    .physical_device_id
-                    .map_or_else(String::new, |id| id.to_string()),
-                copy.storage_object_key.as_deref().unwrap_or(""),
-            ])?;
-        }
+    Ok(())
+}
+
+fn write_csv_group<W: Write>(writer: &mut csv::Writer<W>, group: &DuplicateGroup) -> Result<()> {
+    for copy in &group.copies {
+        writer.write_record([
+            group.full_hash.as_str(),
+            &group.file_size.to_string(),
+            &group.known_copies.to_string(),
+            &group.path_count.to_string(),
+            &group.storage_object_count.to_string(),
+            &group.logical_volume_count.to_string(),
+            &group.physical_device_count.to_string(),
+            &group.verified_physical_device_count.to_string(),
+            &group.unknown_physical_device_count.to_string(),
+            &copy.volume_id.to_string(),
+            copy.volume.as_str(),
+            copy.role.as_str(),
+            copy.path.as_str(),
+            copy.status.as_str(),
+            &copy.is_online.to_string(),
+            &copy
+                .physical_device_id
+                .map_or_else(String::new, |id| id.to_string()),
+            copy.storage_object_key.as_deref().unwrap_or(""),
+        ])?;
     }
-    writer.flush()?;
     Ok(())
 }
 
