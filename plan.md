@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）已完成；最新代码提交 `f3c2f23` 的 GitHub Actions 两个 job 均已实际成功。本轮未扩展删除、隔离、相似媒体或网络功能；原生 App 图标已完成构建和 CI 验收。
+Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）已完成；最新已验收代码提交 `f3c2f23` 的 GitHub Actions 两个 job 均已实际成功。本轮未扩展删除、隔离、相似媒体或网络功能；原生 App 图标的 Bundle 可用性修复已完成本地验证，待提交后的 CI 验收。
 
 ## 已完成
 
@@ -34,11 +34,11 @@ Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）已完成；最�
 - Phase 12.8：`duplicates --csv` 改用内容 ID keyset 分页直接写入 CSV，新增 `duplicates --jsonl` 逐组输出 JSON Lines；两者不再先汇总完整重复报告。回归测试验证流式 CSV 与 JSONL 输出；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
 - Phase 12.9：数据库路径仅会在设置页验证成功后写入 `UserDefaults`；启动时读取非空持久值，否则使用默认 Application Support 路径。新增隔离 UserDefaults suite 的持久化测试；Swift 测试增至 7 项。
 - Phase 12.10：CI `quality` job 增加原生边界守卫，检查 Rust 核心与 Swift App 代码不得重新引入 Web/HTTP/端口监听依赖；文档补充 verified 整盘身份、流式 JSONL/CSV 和迁移备份。已实际运行边界检查、构建 `DiskIndexer.app` 并用 `open` 启动。推送后必须以最新提交的 GitHub Actions 两个 job 成功作为最终验收。
-- 原生 App 图标：新增深蓝—青绿的硬盘索引标志，使用完整 macOS `AppIcon.appiconset`（16px 至 1024px）并接入 Xcode Asset Catalog；不改变任何扫描、清理或网络边界。提交 `f3c2f23` 的 GitHub Actions 运行 `30449757276` 中 `quality` 与 `macos-app` 均已实际成功。
+- 原生 App 图标：新增深蓝—青绿的硬盘索引标志，PNG 源文件覆盖 16px 至 1024px。初版 Xcode Asset Catalog 生成的 Bundle 图标只有 110KB，且自动生成的 Info.plist 未实际写入 `CFBundleIconFile`，会显示 macOS 通用图标。现改为由 `iconutil` 验证的完整 1.96MB `DiskIndexer.icns`，作为 Resources 资源随 Bundle 复制；新增受版本控制的 Info.plist 显式声明 `CFBundleIconFile=DiskIndexer.icns`。CI 的 `macos-app` 会提取并检查 Info.plist、图标文件和全部 10 个标准尺寸，防止回归。不改变任何扫描、清理或网络边界。提交 `f3c2f23` 的 GitHub Actions 运行 `30449757276` 中 `quality` 与 `macos-app` 均已实际成功。
 
 ## 待完成
 
-- 当前没有未完成的 Phase 12 项目或原生 App 图标验收项。
+- 原生 App 图标 Bundle 可用性修复：待提交后的 GitHub Actions 验收。
 
 
 ## 技术决策

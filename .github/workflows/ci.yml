@@ -27,3 +27,10 @@ jobs:
       - run: scripts/build-macos-app.sh
       - run: test -x build/DerivedData/Build/Products/Debug/DiskIndexer.app/Contents/MacOS/DiskIndexer
       - run: test -x build/DerivedData/Build/Products/Debug/DiskIndexer.app/Contents/Resources/disk-indexer
+      - run: |
+          app='build/DerivedData/Build/Products/Debug/DiskIndexer.app'
+          test "$(plutil -extract CFBundleIconFile raw "$app/Contents/Info.plist")" = DiskIndexer.icns
+          test -f "$app/Contents/Resources/DiskIndexer.icns"
+          iconset="$(mktemp -d)/DiskIndexer.iconset"
+          iconutil -c iconset "$app/Contents/Resources/DiskIndexer.icns" -o "$iconset"
+          test "$(find "$iconset" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 10
