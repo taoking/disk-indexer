@@ -127,7 +127,7 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 
 ## 7. macOS 原生 App
 
-在装有 Xcode 26 或兼容版本的 Apple Silicon Mac 上，从仓库根目录执行：
+在装有 Xcode 15.4 或更高兼容版本的 Apple Silicon Mac 上，从仓库根目录执行：
 
 ```bash
 scripts/build-macos-app.sh
