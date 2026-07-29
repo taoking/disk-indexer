@@ -586,6 +586,13 @@ fn migration_backfills_physical_device_for_existing_volume_history() {
 
     let config = Config::new(Some(database_path)).expect("config");
     let database = Database::open(&config).expect("migrate legacy database");
+    let backups = fs::read_dir(temp.path())
+        .expect("read backup directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("legacy.db.before-migration-") && name.ends_with(".sqlite"))
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "迁移前应保留一个 SQLite 一致性备份");
     assert_eq!(database.schema_version().expect("schema version"), 5);
     let volume = database
         .volume_by_uid("legacy:volume")

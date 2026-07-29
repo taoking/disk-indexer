@@ -48,6 +48,7 @@ pub enum MetadataOutcome {
 pub struct Database {
     connection: Connection,
     path: PathBuf,
+    database_existed_before_open: bool,
 }
 
 pub struct VolumeUpsert<'a> {
@@ -93,6 +94,7 @@ pub struct VolumeConflictInput<'a> {
 
 impl Database {
     pub fn open(config: &Config) -> Result<Self> {
+        let database_existed_before_open = config.database_path.is_file();
         if let Some(parent) = config.database_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("无法创建数据库目录 {}", parent.display()))?;
@@ -108,6 +110,7 @@ impl Database {
         let mut database = Self {
             connection,
             path: config.database_path.clone(),
+            database_existed_before_open,
         };
         database.migrate()?;
         database.recover_abandoned_task_runs()?;
@@ -121,6 +124,7 @@ impl Database {
                 applied_at TEXT NOT NULL
             );",
         )?;
+        let mut pending = Vec::new();
         for (version, sql) in MIGRATIONS {
             let applied: Option<String> = self
                 .connection
@@ -131,23 +135,76 @@ impl Database {
                 )
                 .optional()?;
             if applied.is_none() {
-                let transaction = self
-                    .connection
-                    .transaction()
-                    .with_context(|| format!("无法开始数据库迁移事务 {version}"))?;
-                transaction
-                    .execute_batch(sql)
-                    .with_context(|| format!("无法执行数据库迁移 {version}"))?;
-                transaction.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-                    params![version, now()],
-                )?;
-                transaction
-                    .commit()
-                    .with_context(|| format!("无法提交数据库迁移 {version}"))?;
+                pending.push((*version, *sql));
             }
         }
+        let backup_path = if self.database_existed_before_open && !pending.is_empty() {
+            self.check_database_integrity("迁移前")?;
+            Some(self.create_migration_backup()?)
+        } else {
+            None
+        };
+        for (version, sql) in pending {
+            let transaction = self
+                .connection
+                .transaction()
+                .with_context(|| format!("无法开始数据库迁移事务 {version}"))?;
+            transaction.execute_batch(sql).with_context(|| {
+                migration_failure_message("执行", version, backup_path.as_deref())
+            })?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, now()],
+            )?;
+            transaction.commit().with_context(|| {
+                migration_failure_message("提交", version, backup_path.as_deref())
+            })?;
+        }
         self.backfill_volume_identity_links()?;
+        self.check_database_integrity("迁移后")?;
+        Ok(())
+    }
+
+    fn create_migration_backup(&self) -> Result<PathBuf> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = self
+            .path
+            .file_name()
+            .context("数据库路径缺少文件名，无法创建迁移备份")?
+            .to_string_lossy();
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let backup_path = parent.join(format!("{file_name}.before-migration-{timestamp}.sqlite"));
+        self.connection
+            .execute("VACUUM INTO ?1", [backup_path.to_string_lossy().as_ref()])
+            .with_context(|| format!("无法创建迁移前 SQLite 备份 {}", backup_path.display()))?;
+        Ok(backup_path)
+    }
+
+    fn check_database_integrity(&self, phase: &str) -> Result<()> {
+        let quick_check: String = self
+            .connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if quick_check != "ok" {
+            bail!("数据库 {phase} 完整性检查失败: {quick_check}");
+        }
+        let foreign_key_errors = self
+            .connection
+            .prepare("PRAGMA foreign_key_check")?
+            .query_map([], |row| {
+                Ok(format!(
+                    "{}:{} -> {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !foreign_key_errors.is_empty() {
+            bail!(
+                "数据库 {phase} 外键检查失败: {}",
+                foreign_key_errors.join("；")
+            );
+        }
         Ok(())
     }
 
@@ -1540,6 +1597,16 @@ fn checked_page_limit(limit: usize) -> Result<i64> {
 
 fn physical_identifier_conflicts(existing: Option<&str>, candidate: Option<&str>) -> bool {
     matches!((existing, candidate), (Some(left), Some(right)) if left != right)
+}
+
+fn migration_failure_message(action: &str, version: &str, backup_path: Option<&Path>) -> String {
+    match backup_path {
+        Some(path) => format!(
+            "无法{action}数据库迁移 {version}；迁移前备份保存在 {}，请在修复后用该文件恢复",
+            path.display()
+        ),
+        None => format!("无法{action}数据库迁移 {version}"),
+    }
 }
 
 fn stronger_physical_identity_state(
