@@ -88,12 +88,13 @@ final class TaskProcessController: ObservableObject {
     private var process: Process?
     private var lineDecoder = JSONLineDecoder()
     private var terminationWasRequested = false
+    private(set) var localTaskID: UUID?
 
     func start(
         runner: RustCommandRunner,
         databasePath: String,
         command: [String]
-    ) throws {
+    ) throws -> UUID {
         guard !status.isRunning else {
             throw RustCommandError(message: "已有本地任务正在运行；请先等待完成或取消。")
         }
@@ -108,6 +109,8 @@ final class TaskProcessController: ObservableObject {
         diagnostics = []
         currentEvent = nil
         terminationWasRequested = false
+        let localTaskID = UUID()
+        self.localTaskID = localTaskID
         process.executableURL = toolURL
         process.arguments = runner.commandArguments(databasePath: databasePath, command: command)
         process.standardOutput = stdout
@@ -138,9 +141,11 @@ final class TaskProcessController: ObservableObject {
             try process.run()
         } catch {
             self.process = nil
+            self.localTaskID = nil
             status = .failed(error.localizedDescription)
             throw RustCommandError(message: "无法启动内置 Rust CLI：\(error.localizedDescription)")
         }
+        return localTaskID
     }
 
     func cancel() {
@@ -202,6 +207,7 @@ final class TaskProcessController: ObservableObject {
         }
         onFinish?(status)
         onStateFinished?(status)
+        localTaskID = nil
     }
 
     private func recordEvent(_ event: JSONLTaskEvent) {

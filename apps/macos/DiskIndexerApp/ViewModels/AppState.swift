@@ -17,6 +17,20 @@ enum ScanMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum TaskOperation: Equatable {
+    case scan
+    case fullHash
+    case verify
+    case cleanupPlan
+}
+
+struct PendingTaskContext {
+    let localID: UUID
+    let operation: TaskOperation
+    let outputURL: URL?
+    var remoteTaskID: String?
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var databasePath: String
@@ -35,7 +49,7 @@ final class AppState: ObservableObject {
 
     let runner: RustCommandRunner
     let taskController = TaskProcessController()
-    private var cleanupOutputURL: URL?
+    private var pendingTaskContext: PendingTaskContext?
     private var initializedDatabasePaths: Set<String> = []
 
     init(runner: RustCommandRunner = RustCommandRunner()) {
@@ -49,7 +63,15 @@ final class AppState: ObservableObject {
             .appendingPathComponent("index.db")
             .path
         taskController.onEvent = { [weak self] event in
-            self?.record(.info, operation: event.operation, message: eventDescription(event))
+            guard let self else { return }
+            if event.type == "task_started",
+               var context = self.pendingTaskContext,
+               self.taskController.localTaskID == context.localID
+            {
+                context.remoteTaskID = event.taskID
+                self.pendingTaskContext = context
+            }
+            self.record(.info, operation: event.operation, message: eventDescription(event))
         }
         taskController.onDiagnostic = { [weak self] message in
             self?.record(.warning, operation: "Rust CLI", message: message)
@@ -72,9 +94,16 @@ final class AppState: ObservableObject {
             if case .failed = status {
                 self.errorMessage = "任务失败：\(status.label)。详见“日志”页。"
             }
-            if status == .completed, let output = self.cleanupOutputURL {
+            let context = self.pendingTaskContext
+            self.pendingTaskContext = nil
+            if status == .completed,
+               let context,
+               context.operation == .cleanupPlan,
+               let output = context.outputURL,
+               let remoteTaskID = context.remoteTaskID,
+               self.taskController.currentEvent?.taskID == remoteTaskID
+            {
                 self.loadCleanupPlan(at: output)
-                self.cleanupOutputURL = nil
             }
             Task { await self.refresh() }
         }
@@ -192,12 +221,13 @@ final class AppState: ObservableObject {
         case .fullHash: command.append("--full-hash")
         }
         command.append("--jsonl-progress")
-        startLongTask(command, description: "扫描 \(volume.volumeName)")
+        startLongTask(.scan, command: command, description: "扫描 \(volume.volumeName)")
     }
 
     func startFullHash(volume: VolumeSummary) {
         startLongTask(
-            ["hash", "complete", "--volume", "\(volume.id)", "--jsonl-progress"],
+            .fullHash,
+            command: ["hash", "complete", "--volume", "\(volume.id)", "--jsonl-progress"],
             description: "补齐完整哈希 \(volume.volumeName)"
         )
     }
@@ -259,7 +289,6 @@ final class AppState: ObservableObject {
         verifyFullHash: Bool,
         outputURL: URL
     ) {
-        cleanupOutputURL = outputURL
         var command = [
             "cleanup", "plan", "--target-volume", "\(targetVolumeID)", "--keep-volume", "\(keepVolumeID)",
             "--min-remaining-copies", "\(minimumCopies)",
@@ -268,7 +297,12 @@ final class AppState: ObservableObject {
         if verifyMetadata { command.append("--verify-metadata") }
         if verifyFullHash { command.append("--verify-full-hash") }
         command.append("--jsonl-progress")
-        startLongTask(command, description: "生成只读清理计划")
+        startLongTask(
+            .cleanupPlan,
+            command: command,
+            description: "生成只读清理计划",
+            outputURL: outputURL
+        )
     }
 
     func exportLogs(to url: URL) throws {
@@ -288,12 +322,28 @@ final class AppState: ObservableObject {
         ])
     }
 
-    private func startLongTask(_ command: [String], description: String) {
+    private func startLongTask(
+        _ operation: TaskOperation,
+        command: [String],
+        description: String,
+        outputURL: URL? = nil
+    ) {
         do {
-            try taskController.start(runner: runner, databasePath: databasePath, command: command)
+            let localID = try taskController.start(
+                runner: runner,
+                databasePath: databasePath,
+                command: command
+            )
+            pendingTaskContext = PendingTaskContext(
+                localID: localID,
+                operation: operation,
+                outputURL: outputURL,
+                remoteTaskID: nil
+            )
             statusMessage = "已开始\(description)"
             record(.info, operation: "任务", message: statusMessage)
         } catch {
+            pendingTaskContext = nil
             errorMessage = error.localizedDescription
             record(.error, operation: "任务", message: error.localizedDescription)
         }

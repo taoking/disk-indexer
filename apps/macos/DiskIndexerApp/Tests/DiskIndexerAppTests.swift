@@ -61,4 +61,18 @@ final class DiskIndexerAppTests: XCTestCase {
         }
         XCTAssertEqual(events.count, TaskProcessController.maximumRetainedEvents)
     }
+
+    func testPendingCleanupContextBindsLocalAndRemoteTaskIDs() {
+        let localID = UUID()
+        var context = PendingTaskContext(
+            localID: localID,
+            operation: .cleanupPlan,
+            outputURL: URL(fileURLWithPath: "/tmp/plan.json"),
+            remoteTaskID: nil
+        )
+        context.remoteTaskID = "rust-task-1"
+        XCTAssertEqual(context.localID, localID)
+        XCTAssertEqual(context.remoteTaskID, "rust-task-1")
+        XCTAssertEqual(context.operation, .cleanupPlan)
+    }
 }
