@@ -2,6 +2,23 @@ import AppKit
 import Combine
 import Foundation
 
+enum AppSettingsStore {
+    static let databasePathKey = "diskIndexer.databasePath"
+
+    static func databasePath(defaultPath: String, defaults: UserDefaults = .standard) -> String {
+        guard let path = defaults.string(forKey: databasePathKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty
+        else {
+            return defaultPath
+        }
+        return path
+    }
+
+    static func saveDatabasePath(_ path: String, defaults: UserDefaults = .standard) {
+        defaults.set(path, forKey: databasePathKey)
+    }
+}
+
 enum ScanMode: String, CaseIterable, Identifiable {
     case metadataOnly
     case incremental
@@ -58,10 +75,11 @@ final class AppState: ObservableObject {
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first ?? FileManager.default.homeDirectoryForCurrentUser
-        databasePath = applicationSupport
+        let defaultDatabasePath = applicationSupport
             .appendingPathComponent("DiskIndexer", isDirectory: true)
             .appendingPathComponent("index.db")
             .path
+        databasePath = AppSettingsStore.databasePath(defaultPath: defaultDatabasePath)
         taskController.onEvent = { [weak self] event in
             guard let self else { return }
             if event.type == "task_started",
@@ -189,6 +207,7 @@ final class AppState: ObservableObject {
         do {
             let _: DashboardStats = try await runner.runJSON(databasePath: url.path, command: ["stats", "--json"])
             databasePath = url.path
+            AppSettingsStore.saveDatabasePath(url.path)
             record(.info, operation: "设置", message: "已验证并切换数据库 \(url.lastPathComponent)")
             await refresh()
         } catch {

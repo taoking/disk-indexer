@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 12.8（重复报告的流式大数据输出）已完成；下一步是 Phase 12.9（Swift 设置持久化与测试补齐）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
+Phase 12.9（Swift 设置持久化与测试补齐）已完成；下一步是 Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
 
 ## 已完成
 
@@ -32,6 +32,7 @@ Phase 12.8（重复报告的流式大数据输出）已完成；下一步是 Pha
 - Phase 12.6：Swift 增加 `TaskOperation` 与 `PendingTaskContext(localID, operation, outputURL, remoteTaskID)`；`TaskProcessController.start()` 返回本地 UUID，收到同一任务的 `task_started` 后才绑定 Rust task ID。仅当上下文为 cleanup、远端 ID 与当前终态事件匹配且 Rust 成功完成时读取导出的 JSON；完成、失败、取消、中断和启动失败都会清理上下文，普通任务不会触发 cleanup 文件读取。新增上下文绑定单测；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
 - Phase 12.7：已有数据库存在未应用迁移时，升级前使用 SQLite `VACUUM INTO` 在原数据库同目录创建带 UTC 时间戳的 `.before-migration-*.sqlite` 一致性备份；迁移前后执行 `PRAGMA quick_check` 和 `foreign_key_check`。迁移事务失败的信息会给出备份恢复路径。新增旧 schema 升级备份回归测试；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
 - Phase 12.8：`duplicates --csv` 改用内容 ID keyset 分页直接写入 CSV，新增 `duplicates --jsonl` 逐组输出 JSON Lines；两者不再先汇总完整重复报告。回归测试验证流式 CSV 与 JSONL 输出；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
+- Phase 12.9：数据库路径仅会在设置页验证成功后写入 `UserDefaults`；启动时读取非空持久值，否则使用默认 Application Support 路径。新增隔离 UserDefaults suite 的持久化测试；Swift 测试增至 7 项。
 
 ## 待完成
 
@@ -58,7 +59,7 @@ Phase 12.8（重复报告的流式大数据输出）已完成；下一步是 Pha
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 - Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 - Phase 11：当前 Bundle 为未签名 Debug 构建，尚未做 Developer ID 签名、公证或 dmg/pkg 发布；Universal 2 只保留了构建扩展说明，尚未实际合并 x86_64 二进制。GitHub Actions 会在推送本提交后验证 macOS 环境。
-- Phase 12.8：安全、进度、恢复、迁移和流式导出收口已完成；Swift 设置持久化和 Phase 12.10 的 CI/App/GitHub Actions 验收仍待完成。
+- Phase 12.9：安全、进度、恢复、迁移和设置收口已完成；仍需在 Phase 12.10 加固 CI 禁止项、构建并实际启动 App、推送后确认最新 GitHub Actions 成功。
 
 ## 发布记录
 

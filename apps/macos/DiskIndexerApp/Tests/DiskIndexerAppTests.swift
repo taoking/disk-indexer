@@ -75,4 +75,19 @@ final class DiskIndexerAppTests: XCTestCase {
         XCTAssertEqual(context.remoteTaskID, "rust-task-1")
         XCTAssertEqual(context.operation, .cleanupPlan)
     }
+
+    func testDatabasePathSettingsPersistOnlyExplicitValidatedValue() {
+        let suite = "DiskIndexerAppTests.settings.\(UUID().uuidString)"
+        let defaults = try! XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(
+            AppSettingsStore.databasePath(defaultPath: "/tmp/default.db", defaults: defaults),
+            "/tmp/default.db"
+        )
+        AppSettingsStore.saveDatabasePath("/tmp/selected.db", defaults: defaults)
+        XCTAssertEqual(
+            AppSettingsStore.databasePath(defaultPath: "/tmp/default.db", defaults: defaults),
+            "/tmp/selected.db"
+        )
+    }
 }
