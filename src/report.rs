@@ -11,7 +11,9 @@ use std::collections::HashSet;
 use crate::config::Config;
 use crate::db::Database;
 use crate::duplicate::{DuplicateFilter, duplicate_groups, verify_record};
-use crate::model::{CleanupPlan, CleanupPlanItem, DuplicateGroup, LookupResult};
+use crate::model::{
+    CleanupPlan, CleanupPlanItem, DuplicateGroup, LookupResult, PhysicalDeviceIdentityState,
+};
 use crate::util::{human_size, now};
 
 pub const JSON_SCHEMA_VERSION: u32 = 1;
@@ -53,7 +55,7 @@ pub fn duplicate_report<'a>(
         database_path: database.path().display().to_string(),
         groups,
         warnings: vec![
-            "内容重复不等于副本多余；请按物理介质、异地备份和恢复需求评估。".to_owned(),
+            "内容重复不等于副本多余；物理设备统计只计入已验证的整盘身份。".to_owned(),
             "理论可释放空间按每组保留一份计算，不是安全删除建议。".to_owned(),
         ],
     }
@@ -81,8 +83,12 @@ pub fn render_duplicates_text(groups: &[DuplicateGroup]) -> String {
             group.logical_volume_count
         ));
         output.push_str(&format!(
-            "Physical devices: {}\n",
-            group.physical_device_count
+            "Verified physical devices: {}\n",
+            group.verified_physical_device_count
+        ));
+        output.push_str(&format!(
+            "Unknown or unverified device identities: {}\n",
+            group.unknown_physical_device_count
         ));
         output.push_str(&format!("Online copies: {}\n", group.online_copies));
         output.push_str(&format!("Offline copies: {}\n", group.offline_copies));
@@ -125,6 +131,8 @@ pub fn write_csv(path: &Path, groups: &[DuplicateGroup]) -> Result<()> {
         "storage_object_count",
         "logical_volume_count",
         "physical_device_count",
+        "verified_physical_device_count",
+        "unknown_physical_device_count",
         "volume_id",
         "volume",
         "role",
@@ -144,6 +152,8 @@ pub fn write_csv(path: &Path, groups: &[DuplicateGroup]) -> Result<()> {
                 &group.storage_object_count.to_string(),
                 &group.logical_volume_count.to_string(),
                 &group.physical_device_count.to_string(),
+                &group.verified_physical_device_count.to_string(),
+                &group.unknown_physical_device_count.to_string(),
                 &copy.volume_id.to_string(),
                 copy.volume.as_str(),
                 copy.role.as_str(),
@@ -269,7 +279,10 @@ pub fn create_cleanup_plan_with_options(
                 .collect::<HashSet<_>>();
             let remaining_physical_devices = remaining_online
                 .iter()
-                .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
+                .filter(|copy| {
+                    copy.physical_identity_state == PhysicalDeviceIdentityState::Verified
+                })
+                .filter_map(|copy| copy.physical_device_id)
                 .collect::<HashSet<_>>();
             let candidate_storage_object = storage_object_identity(&candidate_delete);
             let mut blocked_reasons = Vec::new();
@@ -287,7 +300,7 @@ pub fn create_cleanup_plan_with_options(
             }
             if remaining_physical_devices.len() < options.min_remaining_physical_devices {
                 blocked_reasons.push(format!(
-                    "移除此路径后仅剩 {} 个物理设备，少于要求的 {} 个。",
+                    "移除此路径后仅剩 {} 个已验证物理设备，少于要求的 {} 个；未知或推断身份不计入安全阈值。",
                     remaining_physical_devices.len(),
                     options.min_remaining_physical_devices
                 ));

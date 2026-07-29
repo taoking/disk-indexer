@@ -9,7 +9,9 @@ use serde::Serialize;
 use crate::config::Config;
 use crate::db::Database;
 use crate::hashing::{full_hash, sample_hash};
-use crate::model::{CopyView, DuplicateGroup, FileRecord, LookupResult};
+use crate::model::{
+    CopyView, DuplicateGroup, FileRecord, LookupResult, PhysicalDeviceIdentityState,
+};
 use crate::util::display_path;
 use crate::volume::{file_metadata, metadata_still_matches};
 
@@ -77,10 +79,8 @@ pub fn duplicate_groups(
                 .iter()
                 .map(|copy| copy.volume_id)
                 .collect::<HashSet<_>>();
-            let physical_devices = copies
-                .iter()
-                .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
-                .collect::<HashSet<_>>();
+            let (verified_physical_device_count, unknown_physical_device_count) =
+                physical_device_counts(&copies);
             let offline_copies = copies
                 .iter()
                 .filter(|copy| copy.status == "offline_unverified")
@@ -99,7 +99,9 @@ pub fn duplicate_groups(
                 path_count: copies.len(),
                 storage_object_count: storage_objects.len(),
                 logical_volume_count: logical_volumes.len(),
-                physical_device_count: physical_devices.len(),
+                physical_device_count: verified_physical_device_count,
+                verified_physical_device_count,
+                unknown_physical_device_count,
                 theoretical_reclaimable_bytes: file_size.saturating_mul(
                     u64::try_from(online_storage_objects.len().saturating_sub(1))
                         .unwrap_or(u64::MAX),
@@ -187,10 +189,8 @@ fn build_duplicate_group(
         .iter()
         .map(|copy| copy.volume_id)
         .collect::<HashSet<_>>();
-    let physical_devices = copies
-        .iter()
-        .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
-        .collect::<HashSet<_>>();
+    let (verified_physical_device_count, unknown_physical_device_count) =
+        physical_device_counts(&copies);
     let offline_copies = copies
         .iter()
         .filter(|copy| copy.status == "offline_unverified")
@@ -209,7 +209,9 @@ fn build_duplicate_group(
         path_count: copies.len(),
         storage_object_count: storage_objects.len(),
         logical_volume_count: logical_volumes.len(),
-        physical_device_count: physical_devices.len(),
+        physical_device_count: verified_physical_device_count,
+        verified_physical_device_count,
+        unknown_physical_device_count,
         theoretical_reclaimable_bytes: file_size.saturating_mul(
             u64::try_from(online_storage_objects.len().saturating_sub(1)).unwrap_or(u64::MAX),
         ),
@@ -444,10 +446,30 @@ pub fn copy_view(record: &FileRecord) -> CopyView {
         status,
         is_online: record.volume_online,
         physical_device_id: record.physical_device_id,
+        physical_identity_state: record.physical_identity_state,
         storage_object_key: record.storage_object_key.clone(),
         link_group_id: record.link_group_id.clone(),
         last_error: record.last_error.clone(),
     }
+}
+
+fn physical_device_counts(copies: &[CopyView]) -> (usize, usize) {
+    let verified = copies
+        .iter()
+        .filter(|copy| copy.physical_identity_state == PhysicalDeviceIdentityState::Verified)
+        .filter_map(|copy| copy.physical_device_id)
+        .collect::<HashSet<_>>();
+    // 该数字只展示“有多少观察到的非验证身份记录”，不代表独立硬盘数量。没有关联记录
+    // 时以 file copy ID 区分，避免用逻辑卷 ID 伪造物理设备。
+    let unknown = copies
+        .iter()
+        .filter(|copy| copy.physical_identity_state != PhysicalDeviceIdentityState::Verified)
+        .map(|copy| match copy.physical_device_id {
+            Some(id) => format!("device:{id}"),
+            None => format!("copy:{}", copy.file_copy_id),
+        })
+        .collect::<HashSet<_>>();
+    (verified.len(), unknown.len())
 }
 
 fn metadata_matches_index(record: &FileRecord, metadata: &crate::model::FileMetadata) -> bool {

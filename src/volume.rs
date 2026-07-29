@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
 use crate::db::{Database, PhysicalDeviceUpsert, VolumeConflictInput, VolumeUpsert};
-use crate::model::{FileMetadata, Volume, VolumeIdentityConflict, VolumeIdentityState, VolumeRole};
+use crate::model::{
+    FileMetadata, PhysicalDeviceIdentityState, Volume, VolumeIdentityConflict, VolumeIdentityState,
+    VolumeRole,
+};
 use crate::util::{display_path, path_bytes, to_ns};
 
 pub const MARKER_FILE: &str = ".disk-indexer-volume-id";
@@ -35,8 +38,13 @@ pub struct VolumeIdentityInput {
     pub filesystem: String,
     pub system_volume_uuid: Option<String>,
     pub partition_uuid: Option<String>,
+    /// 旧版本的卷级 media UUID；仅用于逻辑卷重连兼容，不能证明物理介质身份。
     pub media_uuid: Option<String>,
+    /// 旧版本曾错误地将 DeviceIdentifier 写入此字段；不能用于物理设备计数。
     pub device_serial: Option<String>,
+    pub whole_disk_identifier: Option<String>,
+    pub whole_disk_media_uuid: Option<String>,
+    pub hardware_serial: Option<String>,
     pub model: Option<String>,
     pub transport: Option<String>,
     pub total_size: Option<i64>,
@@ -75,8 +83,14 @@ pub fn register_volume_with_identity(
         (None, _, _) => None,
     };
     let identity = identity_override.unwrap_or(volume_identity(&root)?);
+    let physical_identity = physical_device_identity(&root, &identity);
     let physical_device = database.upsert_physical_device(PhysicalDeviceUpsert {
-        stable_uid: &physical_device_uid(&root, &identity),
+        stable_uid: &physical_identity.stable_uid,
+        whole_disk_identifier: identity.whole_disk_identifier.as_deref(),
+        whole_disk_media_uuid: identity.whole_disk_media_uuid.as_deref(),
+        hardware_serial: identity.hardware_serial.as_deref(),
+        identity_state: physical_identity.state,
+        identity_source: physical_identity.source,
         media_uuid: identity.media_uuid.as_deref(),
         device_serial: identity.device_serial.as_deref(),
         model: identity.model.as_deref(),
@@ -115,7 +129,10 @@ pub fn register_volume_with_identity(
         }
         let matching = existing_volumes
             .iter()
-            .filter(|volume| identity_is_consistent(volume, &identity))
+            .filter(|volume| {
+                identity_is_consistent(volume, &identity)
+                    && physical_identity_is_consistent(database, volume, &identity)
+            })
             .collect::<Vec<_>>();
         if matching.len() == 1 {
             let volume = upsert_registered_volume(
@@ -252,6 +269,41 @@ fn identity_is_consistent(existing: &Volume, candidate: &VolumeIdentityInput) ->
     matched
 }
 
+/// 逻辑卷 UUID 可以帮助重连，但克隆的逻辑卷可能带有同一 UUID。历史设备已经有可信
+/// 整盘级身份时，新挂载点也必须没有与该身份冲突的证据。
+fn physical_identity_is_consistent(
+    database: &Database,
+    existing: &Volume,
+    candidate: &VolumeIdentityInput,
+) -> bool {
+    let Some(physical_device_id) = existing.physical_device_id else {
+        return true;
+    };
+    let Ok(device) = database.physical_device_by_id(physical_device_id) else {
+        return false;
+    };
+    if !device.identity_state.is_verified() {
+        return true;
+    }
+    for (existing_value, candidate_value) in [
+        (
+            device.hardware_serial.as_deref(),
+            candidate.hardware_serial.as_deref(),
+        ),
+        (
+            device.whole_disk_media_uuid.as_deref(),
+            candidate.whole_disk_media_uuid.as_deref(),
+        ),
+    ] {
+        if let (Some(existing_value), Some(candidate_value)) = (existing_value, candidate_value) {
+            if existing_value != candidate_value {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// 显式重连也必须证明同一稳定身份；不能凭 marker 或路径强行覆盖历史卷。
 pub fn relink_volume(database: &mut Database, volume_id: i64, root: &Path) -> Result<Volume> {
     let root = root
@@ -266,11 +318,19 @@ pub fn relink_volume(database: &mut Database, volume_id: i64, root: &Path) -> Re
         bail!("重连拒绝：目标路径的 marker 与历史卷不一致");
     }
     let identity = volume_identity(&root)?;
-    if !identity_is_consistent(&existing, &identity) {
+    if !identity_is_consistent(&existing, &identity)
+        || !physical_identity_is_consistent(database, &existing, &identity)
+    {
         bail!("重连拒绝：目标路径没有可验证的一致稳定设备身份");
     }
+    let physical_identity = physical_device_identity(&root, &identity);
     let physical_device = database.upsert_physical_device(PhysicalDeviceUpsert {
-        stable_uid: &physical_device_uid(&root, &identity),
+        stable_uid: &physical_identity.stable_uid,
+        whole_disk_identifier: identity.whole_disk_identifier.as_deref(),
+        whole_disk_media_uuid: identity.whole_disk_media_uuid.as_deref(),
+        hardware_serial: identity.hardware_serial.as_deref(),
+        identity_state: physical_identity.state,
+        identity_source: physical_identity.source,
         media_uuid: identity.media_uuid.as_deref(),
         device_serial: identity.device_serial.as_deref(),
         model: identity.model.as_deref(),
@@ -401,6 +461,8 @@ impl VolumeIdentityInput {
             || self.partition_uuid.is_some()
             || self.media_uuid.is_some()
             || self.device_serial.is_some()
+            || self.whole_disk_media_uuid.is_some()
+            || self.hardware_serial.is_some()
     }
 }
 
@@ -421,6 +483,9 @@ fn volume_identity(root: &Path) -> Result<VolumeIdentityInput> {
             partition_uuid: None,
             media_uuid: None,
             device_serial: None,
+            whole_disk_identifier: None,
+            whole_disk_media_uuid: None,
+            hardware_serial: None,
             model: None,
             transport: None,
             total_size: None,
@@ -435,6 +500,9 @@ fn volume_identity(root: &Path) -> Result<VolumeIdentityInput> {
             partition_uuid: None,
             media_uuid: None,
             device_serial: None,
+            whole_disk_identifier: None,
+            whole_disk_media_uuid: None,
+            hardware_serial: None,
             model: None,
             transport: None,
             total_size: None,
@@ -447,7 +515,9 @@ fn fallback_volume_uid(root: &Path, identity: &VolumeIdentityInput) -> String {
     let has_stable_platform_identity = identity.system_volume_uuid.is_some()
         || identity.partition_uuid.is_some()
         || identity.media_uuid.is_some()
-        || identity.device_serial.is_some();
+        || identity.device_serial.is_some()
+        || identity.whole_disk_media_uuid.is_some()
+        || identity.hardware_serial.is_some();
     if let Some(uuid) = &identity.system_volume_uuid {
         input.extend_from_slice(uuid.as_bytes());
         input.push(0);
@@ -464,6 +534,14 @@ fn fallback_volume_uid(root: &Path, identity: &VolumeIdentityInput) -> String {
         input.extend_from_slice(media_uuid.as_bytes());
         input.push(0);
     }
+    if let Some(media_uuid) = &identity.whole_disk_media_uuid {
+        input.extend_from_slice(media_uuid.as_bytes());
+        input.push(0);
+    }
+    if let Some(serial) = &identity.hardware_serial {
+        input.extend_from_slice(serial.as_bytes());
+        input.push(0);
+    }
     input.extend_from_slice(identity.filesystem.as_bytes());
     input.push(0);
     input.extend_from_slice(&identity.total_size.unwrap_or_default().to_le_bytes());
@@ -474,53 +552,113 @@ fn fallback_volume_uid(root: &Path, identity: &VolumeIdentityInput) -> String {
     format!("fallback:v1:{}", blake3::hash(&input).to_hex())
 }
 
-fn physical_device_uid(root: &Path, identity: &VolumeIdentityInput) -> String {
+struct PhysicalDeviceIdentity {
+    stable_uid: String,
+    state: PhysicalDeviceIdentityState,
+    source: &'static str,
+}
+
+fn physical_device_identity(root: &Path, identity: &VolumeIdentityInput) -> PhysicalDeviceIdentity {
     let mut input = Vec::new();
-    for (prefix, value) in [
-        ("media", identity.media_uuid.as_deref()),
-        ("serial", identity.device_serial.as_deref()),
-        ("partition", identity.partition_uuid.as_deref()),
-        ("volume", identity.system_volume_uuid.as_deref()),
-    ] {
-        if let Some(value) = value {
-            input.extend_from_slice(prefix.as_bytes());
-            input.push(b':');
-            input.extend_from_slice(value.as_bytes());
-            return format!("physical:v1:{}", blake3::hash(&input).to_hex());
-        }
+    if let Some(serial) = &identity.hardware_serial {
+        input.extend_from_slice(b"hardware-serial:");
+        input.extend_from_slice(serial.as_bytes());
+        return PhysicalDeviceIdentity {
+            stable_uid: format!("physical:v2:{}", blake3::hash(&input).to_hex()),
+            state: PhysicalDeviceIdentityState::Verified,
+            source: "hardware_serial",
+        };
     }
+    if let Some(media_uuid) = &identity.whole_disk_media_uuid {
+        input.extend_from_slice(b"whole-disk-media-uuid:");
+        input.extend_from_slice(media_uuid.as_bytes());
+        return PhysicalDeviceIdentity {
+            stable_uid: format!("physical:v2:{}", blake3::hash(&input).to_hex()),
+            state: PhysicalDeviceIdentityState::Verified,
+            source: "whole_disk_media_uuid",
+        };
+    }
+    if let Some(identifier) = &identity.whole_disk_identifier {
+        input.extend_from_slice(b"whole-disk-identifier:");
+        input.extend_from_slice(identifier.as_bytes());
+        return PhysicalDeviceIdentity {
+            stable_uid: format!("physical:inferred:v2:{}", blake3::hash(&input).to_hex()),
+            state: PhysicalDeviceIdentityState::Inferred,
+            source: "whole_disk_identifier",
+        };
+    }
+    // 未知记录只用于保存观察历史，绝不作为安全计数。路径仅用于避免把所有未知卷合并为
+    // 同一条数据库记录，不能被解释为物理介质独立性。
     input.extend_from_slice(identity.filesystem.as_bytes());
     input.push(0);
     input.extend_from_slice(&identity.total_size.unwrap_or_default().to_le_bytes());
     input.push(0);
     input.extend_from_slice(&path_bytes(root));
-    format!("physical:fallback:v1:{}", blake3::hash(&input).to_hex())
+    PhysicalDeviceIdentity {
+        stable_uid: format!("physical:unknown:v2:{}", blake3::hash(&input).to_hex()),
+        state: PhysicalDeviceIdentityState::Unknown,
+        source: "fallback",
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn macos_volume_identity(root: &Path, fallback_filesystem: String) -> Option<VolumeIdentityInput> {
-    let output = std::process::Command::new("diskutil")
-        .args(["info", "-plist"])
-        .arg(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let plist = String::from_utf8(output.stdout).ok()?;
+    let plist = diskutil_info_plist(root)?;
     let filesystem = plist_value(&plist, "FilesystemType")
         .or_else(|| plist_value(&plist, "FilesystemName"))
         .unwrap_or(fallback_filesystem);
+    let current_identifier = plist_value(&plist, "DeviceIdentifier");
+    let whole_disk_identifier = plist_value(&plist, "ParentWholeDisk").or_else(|| {
+        plist_bool(&plist, "Whole")
+            .filter(|whole| *whole)
+            .and(current_identifier.clone())
+    });
+    let whole_plist = whole_disk_identifier
+        .as_deref()
+        .and_then(|identifier| diskutil_info_plist(Path::new(identifier)));
+    let whole = whole_plist.as_deref();
     Some(VolumeIdentityInput {
         filesystem,
         system_volume_uuid: plist_value(&plist, "VolumeUUID"),
         partition_uuid: plist_value(&plist, "DiskUUID"),
         media_uuid: plist_value(&plist, "MediaUUID"),
-        device_serial: plist_value(&plist, "DeviceIdentifier"),
-        model: plist_value(&plist, "DeviceModel"),
-        transport: plist_value(&plist, "BusProtocol"),
-        total_size: plist_value(&plist, "TotalSize").and_then(|value| value.parse().ok()),
+        // `DeviceIdentifier` 可能是 disk4s2，只能描述分区，故不写入旧 serial 字段。
+        device_serial: None,
+        whole_disk_identifier,
+        whole_disk_media_uuid: whole.and_then(|value| plist_value(value, "MediaUUID")),
+        hardware_serial: whole.and_then(plist_hardware_serial),
+        model: whole
+            .and_then(|value| plist_value(value, "MediaName"))
+            .or_else(|| whole.and_then(|value| plist_value(value, "DeviceModel"))),
+        transport: whole
+            .and_then(|value| plist_value(value, "BusProtocol"))
+            .or_else(|| plist_value(&plist, "BusProtocol")),
+        total_size: whole
+            .and_then(|value| plist_value(value, "TotalSize"))
+            .or_else(|| plist_value(&plist, "TotalSize"))
+            .and_then(|value| value.parse().ok()),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn diskutil_info_plist(target: &Path) -> Option<String> {
+    let output = std::process::Command::new("diskutil")
+        .args(["info", "-plist"])
+        .arg(target)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+}
+
+#[cfg(target_os = "macos")]
+fn plist_hardware_serial(xml: &str) -> Option<String> {
+    ["DeviceSerial", "SerialNumber", "MediaSerialNumber"]
+        .into_iter()
+        .find_map(|key| plist_value(xml, key))
 }
 
 #[cfg(target_os = "macos")]
@@ -534,6 +672,19 @@ fn plist_value(xml: &str, key: &str) -> Option<String> {
     after_open
         .split_once('<')
         .map(|(value, _)| value.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn plist_bool(xml: &str, key: &str) -> Option<bool> {
+    let marker = format!("<key>{key}</key>");
+    let value = xml.split_once(&marker)?.1.trim_start();
+    if value.starts_with("<true/>") {
+        Some(true)
+    } else if value.starts_with("<false/>") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

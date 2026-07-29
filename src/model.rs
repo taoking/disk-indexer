@@ -82,6 +82,47 @@ impl std::str::FromStr for VolumeIdentityState {
     }
 }
 
+/// 物理介质身份的可信程度。只有 `Verified` 能够计入清理计划的物理设备阈值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhysicalDeviceIdentityState {
+    Verified,
+    Inferred,
+    Unknown,
+    Conflict,
+}
+
+impl PhysicalDeviceIdentityState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Inferred => "inferred",
+            Self::Unknown => "unknown",
+            Self::Conflict => "conflict",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_verified(self) -> bool {
+        matches!(self, Self::Verified)
+    }
+}
+
+impl std::str::FromStr for PhysicalDeviceIdentityState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "verified" => Ok(Self::Verified),
+            "inferred" => Ok(Self::Inferred),
+            "unknown" => Ok(Self::Unknown),
+            "conflict" => Ok(Self::Conflict),
+            _ => Err(format!("不支持的物理设备身份状态: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Volume {
     pub id: i64,
@@ -106,8 +147,16 @@ pub struct Volume {
 pub struct PhysicalDevice {
     pub id: i64,
     pub stable_uid: String,
+    /// 保留旧列以兼容历史数据库；它可能是卷级 `MediaUUID`，不能证明物理介质身份。
     pub media_uuid: Option<String>,
+    /// 保留旧列以兼容历史数据库；它可能被旧版本写成分区 `DeviceIdentifier`。
     pub device_serial: Option<String>,
+    pub whole_disk_identifier: Option<String>,
+    pub whole_disk_media_uuid: Option<String>,
+    pub hardware_serial: Option<String>,
+    pub identity_state: PhysicalDeviceIdentityState,
+    pub identity_source: String,
+    pub last_verified_at: Option<String>,
     pub model: Option<String>,
     pub transport: Option<String>,
     pub total_size: Option<i64>,
@@ -145,6 +194,7 @@ pub struct FileRecord {
     pub volume_role: VolumeRole,
     pub volume_online: bool,
     pub physical_device_id: Option<i64>,
+    pub physical_identity_state: PhysicalDeviceIdentityState,
     pub relative_path: PathBuf,
     pub file_size: u64,
     pub modified_at_ns: Option<i64>,
@@ -207,6 +257,7 @@ pub struct CopyView {
     pub status: String,
     pub is_online: bool,
     pub physical_device_id: Option<i64>,
+    pub physical_identity_state: PhysicalDeviceIdentityState,
     pub storage_object_key: Option<String>,
     pub link_group_id: Option<String>,
     pub last_error: Option<String>,
@@ -223,7 +274,10 @@ pub struct DuplicateGroup {
     pub path_count: usize,
     pub storage_object_count: usize,
     pub logical_volume_count: usize,
+    /// 兼容旧 API；其值等于 `verified_physical_device_count`，绝不包含未知设备。
     pub physical_device_count: usize,
+    pub verified_physical_device_count: usize,
+    pub unknown_physical_device_count: usize,
     pub theoretical_reclaimable_bytes: u64,
     pub copies: Vec<CopyView>,
 }

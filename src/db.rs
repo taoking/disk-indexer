@@ -9,8 +9,8 @@ use serde_json::json;
 
 use crate::config::Config;
 use crate::model::{
-    FileMetadata, FileRecord, PhysicalDevice, Volume, VolumeIdentityConflict, VolumeIdentityState,
-    VolumeRole,
+    FileMetadata, FileRecord, PhysicalDevice, PhysicalDeviceIdentityState, Volume,
+    VolumeIdentityConflict, VolumeIdentityState, VolumeRole,
 };
 use crate::util::{display_bytes, display_path, now, path_bytes, path_from_bytes};
 
@@ -30,6 +30,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0004_task_protocol_and_paging",
         include_str!("../migrations/0004_task_protocol_and_paging.sql"),
+    ),
+    (
+        "0005_physical_device_identity_v2",
+        include_str!("../migrations/0005_physical_device_identity_v2.sql"),
     ),
 ];
 
@@ -62,6 +66,11 @@ pub struct VolumeUpsert<'a> {
 
 pub struct PhysicalDeviceUpsert<'a> {
     pub stable_uid: &'a str,
+    pub whole_disk_identifier: Option<&'a str>,
+    pub whole_disk_media_uuid: Option<&'a str>,
+    pub hardware_serial: Option<&'a str>,
+    pub identity_state: PhysicalDeviceIdentityState,
+    pub identity_source: &'a str,
     pub media_uuid: Option<&'a str>,
     pub device_serial: Option<&'a str>,
     pub model: Option<&'a str>,
@@ -144,73 +153,42 @@ impl Database {
     fn backfill_volume_identity_links(&mut self) -> Result<()> {
         let legacy_volumes = {
             let mut statement = self.connection.prepare(
-                "SELECT id, system_volume_uuid, partition_uuid, device_serial, filesystem,
-                        total_size, mount_path FROM volumes WHERE physical_device_id IS NULL",
+                "SELECT id, device_serial, total_size FROM volumes WHERE physical_device_id IS NULL",
             )?;
             statement
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Option<i64>>(2)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (
-            volume_id,
-            system_uuid,
-            partition_uuid,
-            legacy_media_uuid,
-            filesystem,
-            total_size,
-            mount_path,
-        ) in legacy_volumes
-        {
-            let mut stable_input = Vec::new();
-            for value in [&system_uuid, &partition_uuid, &legacy_media_uuid]
-                .into_iter()
-                .flatten()
-            {
-                stable_input.extend_from_slice(value.as_bytes());
-                stable_input.push(0);
-            }
-            if stable_input.is_empty() {
-                stable_input
-                    .extend_from_slice(filesystem.as_deref().unwrap_or("unknown").as_bytes());
-                stable_input.push(0);
-                stable_input.extend_from_slice(&total_size.unwrap_or_default().to_le_bytes());
-                stable_input.extend_from_slice(&mount_path);
-            }
-            let stable_uid = format!(
-                "physical:legacy:v1:{}",
-                blake3::hash(&stable_input).to_hex()
-            );
+        for (volume_id, legacy_media_uuid, total_size) in legacy_volumes {
+            // 旧版本只保存卷、分区或路径级线索。这些线索既不能证明两卷位于同一块
+            // 硬盘，也不能证明它们位于不同硬盘，所以每条回填记录都显式标为 unknown。
+            // 这里的 UID 只保证数据库关联稳定，绝不参与安全物理设备计数。
+            let stable_uid = format!("physical:legacy:unknown:v2:{volume_id}");
             let physical_device = self.upsert_physical_device(PhysicalDeviceUpsert {
                 stable_uid: &stable_uid,
+                whole_disk_identifier: None,
+                whole_disk_media_uuid: None,
+                hardware_serial: None,
+                identity_state: PhysicalDeviceIdentityState::Unknown,
+                identity_source: "legacy_volume_identity",
                 media_uuid: legacy_media_uuid.as_deref(),
                 device_serial: None,
                 model: None,
                 transport: None,
                 total_size,
             })?;
-            let identity_state =
-                if system_uuid.is_some() || partition_uuid.is_some() || legacy_media_uuid.is_some()
-                {
-                    VolumeIdentityState::Verified
-                } else {
-                    VolumeIdentityState::Fallback
-                };
             self.connection.execute(
                 "UPDATE volumes SET physical_device_id = ?1, identity_state = ?2, updated_at = ?3
                  WHERE id = ?4",
                 params![
                     physical_device.id,
-                    identity_state.as_str(),
+                    VolumeIdentityState::Fallback.as_str(),
                     now(),
                     volume_id
                 ],
@@ -449,45 +427,95 @@ impl Database {
         input: PhysicalDeviceUpsert<'_>,
     ) -> Result<PhysicalDevice> {
         let timestamp = now();
-        let existing: Option<i64> = self
-            .connection
-            .query_row(
-                "SELECT id FROM physical_devices WHERE stable_uid = ?1",
-                [input.stable_uid],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let matching_ids = self.physical_device_ids_for_identifiers(
+            input.hardware_serial,
+            input.whole_disk_media_uuid,
+            input.stable_uid,
+        )?;
+        let existing = matching_ids.first().copied();
+        let conflicting_records = matching_ids.len() > 1;
         if let Some(id) = existing {
+            let existing_device = self.physical_device_by_id(id)?;
+            let conflicting_identifiers = conflicting_records
+                || physical_identifier_conflicts(
+                    existing_device.hardware_serial.as_deref(),
+                    input.hardware_serial,
+                )
+                || physical_identifier_conflicts(
+                    existing_device.whole_disk_media_uuid.as_deref(),
+                    input.whole_disk_media_uuid,
+                );
+            let identity_state = if conflicting_identifiers {
+                PhysicalDeviceIdentityState::Conflict
+            } else {
+                stronger_physical_identity_state(
+                    existing_device.identity_state,
+                    input.identity_state,
+                )
+            };
+            let identity_source = if conflicting_identifiers {
+                "conflict"
+            } else if identity_state == input.identity_state {
+                input.identity_source
+            } else {
+                existing_device.identity_source.as_str()
+            };
             self.connection.execute(
-                "UPDATE physical_devices SET media_uuid = COALESCE(?1, media_uuid),
-                    device_serial = COALESCE(?2, device_serial), model = COALESCE(?3, model),
-                    transport = COALESCE(?4, transport), total_size = COALESCE(?5, total_size),
-                    last_seen_at = ?6, updated_at = ?6 WHERE id = ?7",
+                "UPDATE physical_devices SET whole_disk_identifier = COALESCE(?1, whole_disk_identifier),
+                    whole_disk_media_uuid = COALESCE(?2, whole_disk_media_uuid),
+                    hardware_serial = COALESCE(?3, hardware_serial),
+                    identity_state = ?4, identity_source = ?5,
+                    last_verified_at = CASE WHEN ?4 = 'verified' THEN ?6 ELSE last_verified_at END,
+                    media_uuid = COALESCE(?7, media_uuid), device_serial = COALESCE(?8, device_serial),
+                    model = COALESCE(?9, model), transport = COALESCE(?10, transport),
+                    total_size = COALESCE(?11, total_size), last_seen_at = ?6, updated_at = ?6 WHERE id = ?12",
                 params![
+                    input.whole_disk_identifier,
+                    input.whole_disk_media_uuid,
+                    input.hardware_serial,
+                    identity_state.as_str(),
+                    identity_source,
+                    timestamp,
                     input.media_uuid,
                     input.device_serial,
                     input.model,
                     input.transport,
                     input.total_size,
-                    timestamp,
                     id
                 ],
             )?;
+            if conflicting_identifiers {
+                for conflicting_id in matching_ids.iter().copied().filter(|other| *other != id) {
+                    self.connection.execute(
+                        "UPDATE physical_devices SET identity_state = 'conflict', identity_source = 'conflict',
+                            last_seen_at = ?1, updated_at = ?1 WHERE id = ?2",
+                        params![timestamp, conflicting_id],
+                    )?;
+                }
+            }
             return self.physical_device_by_id(id);
         }
         self.connection.execute(
             "INSERT INTO physical_devices (
-                stable_uid, media_uuid, device_serial, model, transport, total_size,
-                first_seen_at, last_seen_at, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7, ?7)",
+                stable_uid, whole_disk_identifier, whole_disk_media_uuid, hardware_serial,
+                identity_state, identity_source, last_verified_at, media_uuid, device_serial,
+                model, transport, total_size, first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+                CASE WHEN ?5 = 'verified' THEN ?7 ELSE NULL END, ?8, ?9, ?10, ?11, ?12,
+                ?7, ?7, ?7, ?7)",
             params![
                 input.stable_uid,
+                input.whole_disk_identifier,
+                input.whole_disk_media_uuid,
+                input.hardware_serial,
+                input.identity_state.as_str(),
+                input.identity_source,
+                timestamp,
                 input.media_uuid,
                 input.device_serial,
                 input.model,
                 input.transport,
                 input.total_size,
-                timestamp
             ],
         )?;
         self.physical_device_by_id(self.connection.last_insert_rowid())
@@ -496,13 +524,37 @@ impl Database {
     pub fn physical_device_by_id(&self, id: i64) -> Result<PhysicalDevice> {
         self.connection
             .query_row(
-                "SELECT id, stable_uid, media_uuid, device_serial, model, transport, total_size,
-                        first_seen_at, last_seen_at FROM physical_devices WHERE id = ?1",
+                "SELECT id, stable_uid, media_uuid, device_serial, whole_disk_identifier,
+                        whole_disk_media_uuid, hardware_serial, identity_state, identity_source,
+                        last_verified_at, model, transport, total_size, first_seen_at, last_seen_at
+                 FROM physical_devices WHERE id = ?1",
                 [id],
                 row_to_physical_device,
             )
             .optional()?
             .ok_or_else(|| anyhow!("未找到物理设备 ID {id}"))
+    }
+
+    fn physical_device_ids_for_identifiers(
+        &self,
+        hardware_serial: Option<&str>,
+        whole_disk_media_uuid: Option<&str>,
+        stable_uid: &str,
+    ) -> Result<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM physical_devices
+             WHERE stable_uid = ?1
+                OR (?2 IS NOT NULL AND hardware_serial = ?2)
+                OR (?3 IS NOT NULL AND whole_disk_media_uuid = ?3)
+             ORDER BY id",
+        )?;
+        statement
+            .query_map(
+                params![stable_uid, hardware_serial, whole_disk_media_uuid],
+                |row| row.get(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     pub fn volume_by_id(&self, id: i64) -> Result<Volume> {
@@ -1361,16 +1413,25 @@ fn row_to_volume(row: &Row<'_>) -> rusqlite::Result<Volume> {
 }
 
 fn row_to_physical_device(row: &Row<'_>) -> rusqlite::Result<PhysicalDevice> {
+    let identity_state: String = row.get(7)?;
     Ok(PhysicalDevice {
         id: row.get(0)?,
         stable_uid: row.get(1)?,
         media_uuid: row.get(2)?,
         device_serial: row.get(3)?,
-        model: row.get(4)?,
-        transport: row.get(5)?,
-        total_size: row.get(6)?,
-        first_seen_at: row.get(7)?,
-        last_seen_at: row.get(8)?,
+        whole_disk_identifier: row.get(4)?,
+        whole_disk_media_uuid: row.get(5)?,
+        hardware_serial: row.get(6)?,
+        identity_state: identity_state
+            .parse()
+            .unwrap_or(PhysicalDeviceIdentityState::Unknown),
+        identity_source: row.get(8)?,
+        last_verified_at: row.get(9)?,
+        model: row.get(10)?,
+        transport: row.get(11)?,
+        total_size: row.get(12)?,
+        first_seen_at: row.get(13)?,
+        last_seen_at: row.get(14)?,
     })
 }
 
@@ -1399,15 +1460,18 @@ fn row_to_volume_conflict(row: &Row<'_>) -> rusqlite::Result<VolumeIdentityConfl
 fn file_record_select(where_clause: &str) -> String {
     format!(
         "SELECT f.id, f.volume_id, v.volume_uid, v.volume_name, v.role, v.is_online, v.physical_device_id,
+                COALESCE(pd.identity_state, 'unknown'),
                 f.relative_path, f.file_size, f.modified_at_ns, f.created_at_ns, f.inode, f.device_id,
                 f.storage_object_key, f.link_group_id, f.content_id, f.sample_hash, f.full_hash,
                 f.hash_state, f.status, f.last_error, f.first_seen_at, f.last_seen_at, f.last_verified_at
-         FROM file_copies f JOIN volumes v ON v.id = f.volume_id {where_clause}"
+         FROM file_copies f JOIN volumes v ON v.id = f.volume_id
+         LEFT JOIN physical_devices pd ON pd.id = v.physical_device_id {where_clause}"
     )
 }
 
 fn row_to_file_record(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
     let role: String = row.get(4)?;
+    let physical_identity_state: String = row.get(7)?;
     Ok(FileRecord {
         id: row.get(0)?,
         volume_id: row.get(1)?,
@@ -1416,23 +1480,26 @@ fn row_to_file_record(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
         volume_role: role.parse().unwrap_or(VolumeRole::Unknown),
         volume_online: row.get::<_, i64>(5)? != 0,
         physical_device_id: row.get(6)?,
-        relative_path: path_from_bytes(&row.get::<_, Vec<u8>>(7)?),
-        file_size: row.get(8)?,
-        modified_at_ns: row.get(9)?,
-        created_at_ns: row.get(10)?,
-        inode: row.get(11)?,
-        device_id: row.get(12)?,
-        storage_object_key: row.get(13)?,
-        link_group_id: row.get(14)?,
-        content_id: row.get(15)?,
-        sample_hash: row.get(16)?,
-        full_hash: row.get(17)?,
-        hash_state: row.get(18)?,
-        status: row.get(19)?,
-        last_error: row.get(20)?,
-        first_seen_at: row.get(21)?,
-        last_seen_at: row.get(22)?,
-        last_verified_at: row.get(23)?,
+        physical_identity_state: physical_identity_state
+            .parse()
+            .unwrap_or(PhysicalDeviceIdentityState::Unknown),
+        relative_path: path_from_bytes(&row.get::<_, Vec<u8>>(8)?),
+        file_size: row.get(9)?,
+        modified_at_ns: row.get(10)?,
+        created_at_ns: row.get(11)?,
+        inode: row.get(12)?,
+        device_id: row.get(13)?,
+        storage_object_key: row.get(14)?,
+        link_group_id: row.get(15)?,
+        content_id: row.get(16)?,
+        sample_hash: row.get(17)?,
+        full_hash: row.get(18)?,
+        hash_state: row.get(19)?,
+        status: row.get(20)?,
+        last_error: row.get(21)?,
+        first_seen_at: row.get(22)?,
+        last_seen_at: row.get(23)?,
+        last_verified_at: row.get(24)?,
     })
 }
 
@@ -1441,6 +1508,23 @@ fn checked_page_limit(limit: usize) -> Result<i64> {
         bail!("分页大小必须大于 0");
     }
     i64::try_from(limit).context("分页大小超出 SQLite 整数范围")
+}
+
+fn physical_identifier_conflicts(existing: Option<&str>, candidate: Option<&str>) -> bool {
+    matches!((existing, candidate), (Some(left), Some(right)) if left != right)
+}
+
+fn stronger_physical_identity_state(
+    existing: PhysicalDeviceIdentityState,
+    candidate: PhysicalDeviceIdentityState,
+) -> PhysicalDeviceIdentityState {
+    use PhysicalDeviceIdentityState::{Conflict, Inferred, Unknown, Verified};
+    match (existing, candidate) {
+        (Conflict, _) | (_, Conflict) => Conflict,
+        (Verified, _) | (_, Verified) => Verified,
+        (Inferred, _) | (_, Inferred) => Inferred,
+        (Unknown, Unknown) => Unknown,
+    }
 }
 
 pub fn safe_relative_path(root: &Path, path: &Path) -> Result<PathBuf> {

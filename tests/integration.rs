@@ -21,6 +21,23 @@ fn registered(registration: disk_indexer::volume::VolumeRegistration) -> Volume 
         .expect("注册结果应包含一个可安全使用的卷")
 }
 
+fn test_volume_identity(logical_volume: &str, whole_disk: Option<&str>) -> VolumeIdentityInput {
+    VolumeIdentityInput {
+        filesystem: "apfs".to_owned(),
+        system_volume_uuid: Some(format!("volume-{logical_volume}")),
+        partition_uuid: Some(format!("partition-{logical_volume}")),
+        media_uuid: Some(format!("logical-media-{logical_volume}")),
+        // 这是旧兼容字段，刻意不作为物理介质身份使用。
+        device_serial: Some(format!("legacy-device-{logical_volume}")),
+        whole_disk_identifier: whole_disk.map(|disk| format!("disk-{disk}")),
+        whole_disk_media_uuid: whole_disk.map(|disk| format!("whole-media-{disk}")),
+        hardware_serial: whole_disk.map(|disk| format!("hardware-{disk}")),
+        model: Some("Test Disk".to_owned()),
+        transport: Some("USB".to_owned()),
+        total_size: Some(1_000),
+    }
+}
+
 #[test]
 fn indexes_duplicates_incrementally_and_keeps_offline_history() {
     let temp = tempdir().expect("temporary root");
@@ -37,7 +54,7 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
 
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    assert_eq!(database.schema_version().expect("schema"), 4);
+    assert_eq!(database.schema_version().expect("schema"), 5);
     let a = registered(
         register_volume(
             &mut database,
@@ -119,7 +136,7 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
     assert!(empty_page.groups.is_empty());
     assert!(empty_page.next_after_content_id.is_none());
     let stats = database.dashboard_stats().expect("dashboard stats");
-    assert_eq!(stats["schema_version"], 4);
+    assert_eq!(stats["schema_version"], 5);
     assert_eq!(stats["trusted_duplicate_groups"], 1);
     assert_eq!(stats["theoretical_reclaimable_bytes"], 20);
     let json = serde_json::to_value(duplicate_report(&database, &groups)).expect("json report");
@@ -207,6 +224,9 @@ fn offline_marker_clone_is_never_merged_and_can_be_resolved_as_new_volume() {
         partition_uuid: Some("partition-a".to_owned()),
         media_uuid: Some("media-a".to_owned()),
         device_serial: Some("serial-a".to_owned()),
+        whole_disk_identifier: Some("disk-a".to_owned()),
+        whole_disk_media_uuid: Some("whole-media-a".to_owned()),
+        hardware_serial: Some("hardware-a".to_owned()),
         model: Some("Test Disk".to_owned()),
         transport: Some("USB".to_owned()),
         total_size: Some(1_000),
@@ -243,6 +263,9 @@ fn offline_marker_clone_is_never_merged_and_can_be_resolved_as_new_volume() {
             partition_uuid: Some("partition-b".to_owned()),
             media_uuid: Some("media-b".to_owned()),
             device_serial: Some("serial-b".to_owned()),
+            whole_disk_identifier: Some("disk-b".to_owned()),
+            whole_disk_media_uuid: Some("whole-media-b".to_owned()),
+            hardware_serial: Some("hardware-b".to_owned()),
             model: Some("Clone Disk".to_owned()),
             transport: Some("USB".to_owned()),
             total_size: Some(1_000),
@@ -306,6 +329,9 @@ fn matching_stable_identity_allows_an_offline_volume_to_relink() {
         partition_uuid: Some("stable-partition".to_owned()),
         media_uuid: Some("stable-media".to_owned()),
         device_serial: Some("stable-serial".to_owned()),
+        whole_disk_identifier: Some("stable-disk".to_owned()),
+        whole_disk_media_uuid: Some("stable-whole-media".to_owned()),
+        hardware_serial: Some("stable-hardware".to_owned()),
         model: None,
         transport: None,
         total_size: Some(2_000),
@@ -347,6 +373,190 @@ fn matching_stable_identity_allows_an_offline_volume_to_relink() {
 }
 
 #[test]
+fn whole_disk_identity_groups_partitions_and_keeps_unknown_out_of_safety_counts() {
+    let temp = tempdir().expect("temporary root");
+    let partition_a = temp.path().join("disk-a-partition-1");
+    let partition_b = temp.path().join("disk-a-partition-2");
+    let unknown_a = temp.path().join("unknown-a");
+    let unknown_b = temp.path().join("unknown-b");
+    for path in [&partition_a, &partition_b] {
+        fs::create_dir_all(path).expect("volume directory");
+        fs::write(path.join("copy"), b"same bytes").expect("duplicate copy");
+    }
+    for path in [&unknown_a, &unknown_b] {
+        fs::create_dir_all(path).expect("volume directory");
+        fs::write(path.join("copy"), b"unknown duplicate bytes").expect("duplicate copy");
+    }
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let first_partition = registered(
+        register_volume_with_identity(
+            &mut database,
+            &partition_a,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("partition-a", Some("shared-disk"))),
+        )
+        .expect("first partition"),
+    );
+    let second_partition = registered(
+        register_volume_with_identity(
+            &mut database,
+            &partition_b,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("partition-b", Some("shared-disk"))),
+        )
+        .expect("second partition"),
+    );
+    assert_eq!(
+        first_partition.physical_device_id, second_partition.physical_device_id,
+        "同一整盘的两个逻辑分区必须关联同一物理设备"
+    );
+    for volume in [&first_partition, &second_partition] {
+        scan(
+            &mut database,
+            &config,
+            volume,
+            &ScanOptions {
+                full_hash: true,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("scan known partition");
+    }
+    let same_disk_group = duplicate_groups(&database, DuplicateFilter::default())
+        .expect("same disk duplicate report")
+        .into_iter()
+        .find(|group| group.copies.len() == 2)
+        .expect("same-disk group");
+    assert_eq!(same_disk_group.verified_physical_device_count, 1);
+    assert_eq!(same_disk_group.unknown_physical_device_count, 0);
+
+    let first_unknown = registered(
+        register_volume_with_identity(
+            &mut database,
+            &unknown_a,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("unknown-a", None)),
+        )
+        .expect("first unknown volume"),
+    );
+    let second_unknown = registered(
+        register_volume_with_identity(
+            &mut database,
+            &unknown_b,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("unknown-b", None)),
+        )
+        .expect("second unknown volume"),
+    );
+    for volume in [&first_unknown, &second_unknown] {
+        scan(
+            &mut database,
+            &config,
+            volume,
+            &ScanOptions {
+                full_hash: true,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("scan unknown volume");
+    }
+    let unknown_group = duplicate_groups(&database, DuplicateFilter::default())
+        .expect("unknown duplicate report")
+        .into_iter()
+        .find(|group| {
+            group.copies.iter().all(|copy| {
+                copy.volume_id == first_unknown.id || copy.volume_id == second_unknown.id
+            })
+        })
+        .expect("unknown group");
+    assert_eq!(unknown_group.verified_physical_device_count, 0);
+    assert_eq!(unknown_group.unknown_physical_device_count, 2);
+    let plan = create_cleanup_plan(&database, first_unknown.id, second_unknown.id, 1)
+        .expect("unknown cleanup plan");
+    assert!(plan.items.iter().all(|item| item.status == "blocked"));
+    assert!(plan.items.iter().all(|item| {
+        item.blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("已验证物理设备"))
+    }));
+}
+
+#[test]
+fn different_whole_disks_count_separately_and_conflicts_are_not_verified() {
+    let temp = tempdir().expect("temporary root");
+    let first_path = temp.path().join("first");
+    let second_path = temp.path().join("second");
+    let conflict_path = temp.path().join("conflict");
+    for path in [&first_path, &second_path, &conflict_path] {
+        fs::create_dir_all(path).expect("volume directory");
+        fs::write(path.join("copy"), b"same bytes").expect("duplicate copy");
+    }
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let first = registered(
+        register_volume_with_identity(
+            &mut database,
+            &first_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("first", Some("disk-one"))),
+        )
+        .expect("first disk"),
+    );
+    let second = registered(
+        register_volume_with_identity(
+            &mut database,
+            &second_path,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("second", Some("disk-two"))),
+        )
+        .expect("second disk"),
+    );
+    for volume in [&first, &second] {
+        scan(
+            &mut database,
+            &config,
+            volume,
+            &ScanOptions {
+                full_hash: true,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("scan distinct disk");
+    }
+    let group = duplicate_groups(&database, DuplicateFilter::default())
+        .expect("distinct disk report")
+        .into_iter()
+        .next()
+        .expect("duplicate group");
+    assert_eq!(group.verified_physical_device_count, 2);
+
+    let mut conflicting_identity = test_volume_identity("conflict", Some("disk-one"));
+    conflicting_identity.whole_disk_media_uuid = Some("whole-media-contradiction".to_owned());
+    let conflicting = registered(
+        register_volume_with_identity(
+            &mut database,
+            &conflict_path,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(conflicting_identity),
+        )
+        .expect("register conflicting disk identity"),
+    );
+    assert_eq!(conflicting.physical_device_id, first.physical_device_id);
+    let device = database
+        .physical_device_by_id(first.physical_device_id.expect("first device"))
+        .expect("conflicted physical device");
+    assert_eq!(device.identity_state.as_str(), "conflict");
+}
+
+#[test]
 fn migration_backfills_physical_device_for_existing_volume_history() {
     let temp = tempdir().expect("temporary root");
     let database_path = temp.path().join("legacy.db");
@@ -375,13 +585,18 @@ fn migration_backfills_physical_device_for_existing_volume_history() {
 
     let config = Config::new(Some(database_path)).expect("config");
     let database = Database::open(&config).expect("migrate legacy database");
-    assert_eq!(database.schema_version().expect("schema version"), 4);
+    assert_eq!(database.schema_version().expect("schema version"), 5);
     let volume = database
         .volume_by_uid("legacy:volume")
         .expect("volume lookup")
         .expect("legacy volume");
     assert!(volume.physical_device_id.is_some());
-    assert_eq!(volume.identity_state.as_str(), "verified");
+    assert_eq!(volume.identity_state.as_str(), "fallback");
+    let physical = database
+        .physical_device_by_id(volume.physical_device_id.expect("physical device"))
+        .expect("legacy physical device");
+    assert_eq!(physical.identity_state.as_str(), "unknown");
+    assert_eq!(physical.identity_source, "legacy_volume_identity");
 }
 
 #[test]
@@ -585,7 +800,8 @@ fn hard_links_are_one_storage_object_and_never_cleanup_candidates() {
     assert_eq!(groups[0].path_count, 2);
     assert_eq!(groups[0].storage_object_count, 1);
     assert_eq!(groups[0].theoretical_reclaimable_bytes, 0);
-    assert_eq!(groups[0].physical_device_count, 1);
+    assert_eq!(groups[0].physical_device_count, 0);
+    assert_eq!(groups[0].unknown_physical_device_count, 1);
     let plan = create_cleanup_plan(&database, volume.id, volume.id, 1).expect("cleanup plan");
     assert!(plan.items.iter().all(|item| item.status == "blocked"));
     assert!(plan.items.iter().all(|item| {
@@ -609,20 +825,22 @@ fn duplicate_reports_exclude_nonpresent_statuses_and_cleanup_verifies_files() {
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
     let a = registered(
-        register_volume(
+        register_volume_with_identity(
             &mut database,
             &volume_a,
             VolumeRole::LocalBackup,
             MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("cleanup-a", Some("cleanup-a"))),
         )
         .expect("register a"),
     );
     let b = registered(
-        register_volume(
+        register_volume_with_identity(
             &mut database,
             &volume_b,
             VolumeRole::Primary,
             MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("cleanup-b", Some("cleanup-b"))),
         )
         .expect("register b"),
     );
