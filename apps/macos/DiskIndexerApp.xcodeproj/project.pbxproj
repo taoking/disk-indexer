@@ -17,6 +17,7 @@
 		A10000000000000000000009 /* DiskIndexerAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* DiskIndexerAppTests.swift */; };
 		A10000000000000000000010 /* TaskProcessController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* TaskProcessController.swift */; };
 		A10000000000000000000011 /* TaskViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* TaskViews.swift */; };
+		A10000000000000000000012 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,12 +44,17 @@
 		A20000000000000000000011 /* DiskIndexerAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiskIndexerAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000012 /* TaskProcessController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskProcessController.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* TaskViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskViews.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A60000000000000000000001 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A60000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A90000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000012 /* Assets.xcassets in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXGroup section */
 		A70000000000000000000001 = {
@@ -64,6 +70,7 @@
 			isa = PBXGroup;
 			children = (
 				A70000000000000000000009 /* App */,
+				A20000000000000000000014 /* Assets.xcassets */,
 				A70000000000000000000003 /* Models */,
 				A70000000000000000000004 /* Services */,
 				A70000000000000000000005 /* ViewModels */,
@@ -85,7 +92,7 @@
 		A50000000000000000000001 /* DiskIndexerApp */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXNativeTarget "DiskIndexerApp" */;
-			buildPhases = (A90000000000000000000001 /* Sources */, A60000000000000000000001 /* Frameworks */,);
+			buildPhases = (A90000000000000000000001 /* Sources */, A60000000000000000000001 /* Frameworks */, A90000000000000000000003 /* Resources */,);
 			buildRules = ();
 			dependencies = ();
 			name = DiskIndexerApp;
@@ -135,8 +142,8 @@
 /* Begin XCBuildConfiguration section */
 		AA00000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; SWIFT_STRICT_CONCURRENCY = minimal; }; name = Debug; };
 		AA00000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; CODE_SIGNING_ALLOWED = NO; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 5.0; SWIFT_STRICT_CONCURRENCY = minimal; }; name = Release; };
-		AA00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; }; name = Debug; };
-		AA00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; }; name = Release; };
+		AA00000000000000000000003 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; }; name = Debug; };
+		AA00000000000000000000004 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGNING_ALLOWED = NO; CODE_SIGN_STYLE = Automatic; COMBINE_HIDPI_IMAGES = YES; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = "Disk Indexer"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; MARKETING_VERSION = 0.2.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app; PRODUCT_NAME = DiskIndexer; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; }; name = Release; };
 		AA00000000000000000000005 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskIndexer.app/Contents/MacOS/DiskIndexer"; }; name = Debug; };
 		AA00000000000000000000006 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ARCHS = arm64; BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = org.diskindexer.app.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_STRICT_CONCURRENCY = minimal; SWIFT_VERSION = 5.0; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DiskIndexer.app/Contents/MacOS/DiskIndexer"; }; name = Release; };
 /* End XCBuildConfiguration section */
