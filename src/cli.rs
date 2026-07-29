@@ -16,7 +16,7 @@ use crate::report::{
 };
 use crate::scanner::{ScanOptions, complete_hashes, scan};
 use crate::ui::run_local_ui;
-use crate::volume::{MarkerPolicy, register_volume};
+use crate::volume::{MarkerPolicy, register_volume, relink_volume, resolve_conflict_as_new_volume};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -75,6 +75,15 @@ enum VolumeCommand {
         #[arg(long)]
         json: bool,
     },
+    /// 列出尚未人工确认的 marker / 设备身份冲突
+    Conflicts {
+        #[arg(long)]
+        json: bool,
+    },
+    /// 解决身份冲突；本轮只能明确保留为新卷，绝不自动合并
+    Resolve(VolumeResolveArgs),
+    /// 仅当稳定设备身份一致时，手工重连已有卷到新挂载路径
+    Relink(VolumeRelinkArgs),
 }
 
 #[derive(Debug, Args)]
@@ -86,6 +95,28 @@ struct VolumeAddArgs {
     write_marker: bool,
     #[arg(long, conflicts_with = "write_marker")]
     no_write_marker: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct VolumeResolveArgs {
+    #[arg(long)]
+    conflict: i64,
+    #[arg(long)]
+    as_new_volume: bool,
+    #[arg(long, default_value = "unknown")]
+    role: VolumeRole,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct VolumeRelinkArgs {
+    #[arg(long)]
+    volume: i64,
+    #[arg(long)]
+    path: PathBuf,
     #[arg(long)]
     json: bool,
 }
@@ -280,31 +311,33 @@ fn run_volume(database: &mut Database, command: VolumeCommand) -> Result<()> {
             let registration = register_volume(database, &args.path, args.role, policy)?;
             if args.json {
                 print_json(&serde_json::json!({
-                    "volume": volume_json(&registration.volume),
+                    "status": registration.identity_state.as_str(),
+                    "volume": registration.volume.as_ref().map(volume_json),
                     "marker_uid": registration.marker_uid,
                     "writable": registration.writable,
                     "used_fallback_identity": registration.used_fallback_identity,
-                    "identity_conflict": false,
+                    "identity_conflict": registration.conflict.as_ref().map(volume_conflict_json),
                 }))?;
+            } else if let Some(conflict) = registration.conflict {
+                println!("卷身份状态: possible_clone");
+                println!("冲突 ID: {}", conflict.id);
+                println!("历史卷 ID: {}", conflict.existing_volume_id);
+                println!("候选路径: {}", conflict.candidate_mount_path.display());
+                println!("未写入或覆盖任何历史卷；请先运行 `disk-indexer volume conflicts` 审核。");
             } else {
-                println!("卷 ID: {}", registration.volume.id);
-                println!("卷名称: {}", registration.volume.volume_name);
-                println!("挂载路径: {}", registration.volume.mount_path.display());
+                let volume = registration
+                    .volume
+                    .context("卷注册未产生可安全使用的卷记录")?;
+                println!("卷 ID: {}", volume.id);
+                println!("卷名称: {}", volume.volume_name);
+                println!("挂载路径: {}", volume.mount_path.display());
                 println!(
                     "系统卷 UUID: {}",
-                    registration
-                        .volume
-                        .system_volume_uuid
-                        .as_deref()
-                        .unwrap_or("不可用")
+                    volume.system_volume_uuid.as_deref().unwrap_or("不可用")
                 );
                 println!(
                     "设备标识: {}",
-                    registration
-                        .volume
-                        .filesystem
-                        .as_deref()
-                        .unwrap_or("不可用")
+                    volume.filesystem.as_deref().unwrap_or("不可用")
                 );
                 println!(
                     "marker UID: {}",
@@ -313,7 +346,7 @@ fn run_volume(database: &mut Database, command: VolumeCommand) -> Result<()> {
                         .as_deref()
                         .unwrap_or("未写入，使用保守回退身份")
                 );
-                println!("最终 volume UID: {}", registration.volume.volume_uid);
+                println!("最终 volume UID: {}", volume.volume_uid);
                 println!("可写: {}", registration.writable);
                 println!("身份冲突: 否");
             }
@@ -364,6 +397,55 @@ fn run_volume(database: &mut Database, command: VolumeCommand) -> Result<()> {
                 );
                 println!("首次发现: {}", volume.first_seen_at);
                 println!("最后发现: {}", volume.last_seen_at);
+            }
+        }
+        VolumeCommand::Conflicts { json } => {
+            let conflicts = database.open_volume_conflicts()?;
+            if json {
+                let values = conflicts
+                    .iter()
+                    .map(volume_conflict_json)
+                    .collect::<Vec<_>>();
+                print_json(&values)?;
+            } else if conflicts.is_empty() {
+                println!("没有待处理的卷身份冲突。");
+            } else {
+                for conflict in conflicts {
+                    println!(
+                        "{}\topen\t历史卷 {}\t候选路径 {}\t检测于 {}",
+                        conflict.id,
+                        conflict.existing_volume_id,
+                        conflict.candidate_mount_path.display(),
+                        conflict.detected_at
+                    );
+                }
+            }
+        }
+        VolumeCommand::Resolve(args) => {
+            if !args.as_new_volume {
+                bail!("为避免误合并，volume resolve 当前必须显式指定 --as-new-volume");
+            }
+            let volume = resolve_conflict_as_new_volume(database, args.conflict, args.role)?;
+            if args.json {
+                print_json(&serde_json::json!({
+                    "status": "resolved_as_new_volume",
+                    "volume": volume_json(&volume),
+                    "conflict_id": args.conflict,
+                }))?;
+            } else {
+                println!("已将冲突 {} 保留为独立卷 ID {}。", args.conflict, volume.id);
+            }
+        }
+        VolumeCommand::Relink(args) => {
+            let volume = relink_volume(database, args.volume, &args.path)?;
+            if args.json {
+                print_json(&volume_json(&volume))?;
+            } else {
+                println!(
+                    "卷 {} 已重连到 {}。",
+                    volume.id,
+                    volume.mount_path.display()
+                );
             }
         }
     }
@@ -423,10 +505,13 @@ fn run_scan(database: &mut Database, config: &Config, command: ScanCommand) -> R
         existing_role,
         MarkerPolicy::WriteIfPossible,
     )?;
+    let volume = registration.volume.context(
+        "扫描已停止：检测到 possible_clone；请先使用 volume conflicts 审核并 resolve 或 relink",
+    )?;
     let summary = scan(
         database,
         config,
-        &registration.volume,
+        &volume,
         &ScanOptions {
             full_hash: command.full_hash,
             metadata_only: command.metadata_only,
@@ -529,10 +614,34 @@ fn volume_json(volume: &crate::model::Volume) -> serde_json::Value {
         "device_serial": volume.device_serial,
         "partition_uuid": volume.partition_uuid,
         "total_size": volume.total_size,
+        "physical_device_id": volume.physical_device_id,
+        "identity_state": volume.identity_state.as_str(),
         "role": volume.role.as_str(),
         "is_online": volume.is_online,
         "first_seen_at": volume.first_seen_at,
         "last_seen_at": volume.last_seen_at,
+    })
+}
+
+fn volume_conflict_json(conflict: &crate::model::VolumeIdentityConflict) -> serde_json::Value {
+    serde_json::json!({
+        "id": conflict.id,
+        "state": conflict.state,
+        "existing_volume_id": conflict.existing_volume_id,
+        "existing_volume_uid": conflict.existing_volume_uid,
+        "candidate_marker_uid": conflict.candidate_marker_uid,
+        "candidate_mount_path": conflict.candidate_mount_path.to_string_lossy(),
+        "candidate_filesystem": conflict.candidate_filesystem,
+        "candidate_system_volume_uuid": conflict.candidate_system_volume_uuid,
+        "candidate_partition_uuid": conflict.candidate_partition_uuid,
+        "candidate_media_uuid": conflict.candidate_media_uuid,
+        "candidate_device_serial": conflict.candidate_device_serial,
+        "candidate_total_size": conflict.candidate_total_size,
+        "candidate_physical_device_id": conflict.candidate_physical_device_id,
+        "resolution": conflict.resolution,
+        "resolved_volume_id": conflict.resolved_volume_id,
+        "detected_at": conflict.detected_at,
+        "resolved_at": conflict.resolved_at,
     })
 }
 

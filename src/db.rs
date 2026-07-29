@@ -8,13 +8,22 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::json;
 
 use crate::config::Config;
-use crate::model::{FileMetadata, FileRecord, Volume, VolumeRole};
+use crate::model::{
+    FileMetadata, FileRecord, PhysicalDevice, Volume, VolumeIdentityConflict, VolumeIdentityState,
+    VolumeRole,
+};
 use crate::util::{display_bytes, display_path, now, path_bytes, path_from_bytes};
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_initial",
-    include_str!("../migrations/0001_initial.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_initial",
+        include_str!("../migrations/0001_initial.sql"),
+    ),
+    (
+        "0002_volume_identity_safety",
+        include_str!("../migrations/0002_volume_identity_safety.sql"),
+    ),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataOutcome {
@@ -38,7 +47,31 @@ pub struct VolumeUpsert<'a> {
     pub device_serial: Option<&'a str>,
     pub partition_uuid: Option<&'a str>,
     pub total_size: Option<i64>,
+    pub physical_device_id: Option<i64>,
+    pub identity_state: VolumeIdentityState,
     pub role: VolumeRole,
+}
+
+pub struct PhysicalDeviceUpsert<'a> {
+    pub stable_uid: &'a str,
+    pub media_uuid: Option<&'a str>,
+    pub device_serial: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub transport: Option<&'a str>,
+    pub total_size: Option<i64>,
+}
+
+pub struct VolumeConflictInput<'a> {
+    pub existing_volume_id: i64,
+    pub candidate_marker_uid: Option<&'a str>,
+    pub candidate_root: &'a Path,
+    pub candidate_filesystem: Option<&'a str>,
+    pub candidate_system_volume_uuid: Option<&'a str>,
+    pub candidate_partition_uuid: Option<&'a str>,
+    pub candidate_media_uuid: Option<&'a str>,
+    pub candidate_device_serial: Option<&'a str>,
+    pub candidate_total_size: Option<i64>,
+    pub candidate_physical_device_id: Option<i64>,
 }
 
 impl Database {
@@ -96,6 +129,92 @@ impl Database {
                     .with_context(|| format!("无法提交数据库迁移 {version}"))?;
             }
         }
+        self.backfill_volume_identity_links()?;
+        Ok(())
+    }
+
+    fn backfill_volume_identity_links(&mut self) -> Result<()> {
+        let legacy_volumes = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, system_volume_uuid, partition_uuid, device_serial, filesystem,
+                        total_size, mount_path FROM volumes WHERE physical_device_id IS NULL",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (
+            volume_id,
+            system_uuid,
+            partition_uuid,
+            legacy_media_uuid,
+            filesystem,
+            total_size,
+            mount_path,
+        ) in legacy_volumes
+        {
+            let mut stable_input = Vec::new();
+            for value in [&system_uuid, &partition_uuid, &legacy_media_uuid]
+                .into_iter()
+                .flatten()
+            {
+                stable_input.extend_from_slice(value.as_bytes());
+                stable_input.push(0);
+            }
+            if stable_input.is_empty() {
+                stable_input
+                    .extend_from_slice(filesystem.as_deref().unwrap_or("unknown").as_bytes());
+                stable_input.push(0);
+                stable_input.extend_from_slice(&total_size.unwrap_or_default().to_le_bytes());
+                stable_input.extend_from_slice(&mount_path);
+            }
+            let stable_uid = format!(
+                "physical:legacy:v1:{}",
+                blake3::hash(&stable_input).to_hex()
+            );
+            let physical_device = self.upsert_physical_device(PhysicalDeviceUpsert {
+                stable_uid: &stable_uid,
+                media_uuid: legacy_media_uuid.as_deref(),
+                device_serial: None,
+                model: None,
+                transport: None,
+                total_size,
+            })?;
+            let identity_state =
+                if system_uuid.is_some() || partition_uuid.is_some() || legacy_media_uuid.is_some()
+                {
+                    VolumeIdentityState::Verified
+                } else {
+                    VolumeIdentityState::Fallback
+                };
+            self.connection.execute(
+                "UPDATE volumes SET physical_device_id = ?1, identity_state = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![
+                    physical_device.id,
+                    identity_state.as_str(),
+                    now(),
+                    volume_id
+                ],
+            )?;
+            self.record_volume_event(
+                Some(volume_id),
+                None,
+                "legacy_physical_identity_backfilled",
+                None,
+                Some(json!({"physical_device_id": physical_device.id})),
+            )?;
+        }
         Ok(())
     }
 
@@ -123,6 +242,8 @@ impl Database {
             device_serial,
             partition_uuid,
             total_size,
+            physical_device_id,
+            identity_state,
             role,
         } = input;
         let timestamp = now();
@@ -148,8 +269,9 @@ impl Database {
                     filesystem = COALESCE(?3, filesystem), mount_path = ?4, mount_path_display = ?5,
                     system_volume_uuid = COALESCE(?6, system_volume_uuid),
                     device_serial = COALESCE(?7, device_serial), partition_uuid = COALESCE(?8, partition_uuid),
-                    total_size = COALESCE(?9, total_size), role = ?10, is_online = 1,
-                    last_seen_at = ?11, updated_at = ?11 WHERE id = ?12",
+                    total_size = COALESCE(?9, total_size), physical_device_id = COALESCE(?10, physical_device_id),
+                    identity_state = ?11, role = ?12, is_online = 1,
+                    last_seen_at = ?13, updated_at = ?13 WHERE id = ?14",
                 params![
                     marker_uid,
                     volume_name,
@@ -160,6 +282,8 @@ impl Database {
                     device_serial,
                     partition_uuid,
                     total_size,
+                    physical_device_id,
+                    identity_state.as_str(),
                     role.as_str(),
                     timestamp,
                     id
@@ -171,8 +295,8 @@ impl Database {
             "INSERT INTO volumes (
                 volume_uid, marker_uid, volume_name, filesystem, mount_path, mount_path_display,
                 system_volume_uuid, device_serial, partition_uuid, total_size, role, is_online,
-                first_seen_at, last_seen_at, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?12, ?12, ?12)",
+                physical_device_id, identity_state, first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, ?13, ?14, ?14, ?14, ?14)",
             params![
                 volume_uid,
                 marker_uid,
@@ -185,18 +309,81 @@ impl Database {
                 partition_uuid,
                 total_size,
                 role.as_str(),
+                physical_device_id,
+                identity_state.as_str(),
                 timestamp
             ],
         )?;
         self.volume_by_id(self.connection.last_insert_rowid())
     }
 
+    pub fn upsert_physical_device(
+        &mut self,
+        input: PhysicalDeviceUpsert<'_>,
+    ) -> Result<PhysicalDevice> {
+        let timestamp = now();
+        let existing: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM physical_devices WHERE stable_uid = ?1",
+                [input.stable_uid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            self.connection.execute(
+                "UPDATE physical_devices SET media_uuid = COALESCE(?1, media_uuid),
+                    device_serial = COALESCE(?2, device_serial), model = COALESCE(?3, model),
+                    transport = COALESCE(?4, transport), total_size = COALESCE(?5, total_size),
+                    last_seen_at = ?6, updated_at = ?6 WHERE id = ?7",
+                params![
+                    input.media_uuid,
+                    input.device_serial,
+                    input.model,
+                    input.transport,
+                    input.total_size,
+                    timestamp,
+                    id
+                ],
+            )?;
+            return self.physical_device_by_id(id);
+        }
+        self.connection.execute(
+            "INSERT INTO physical_devices (
+                stable_uid, media_uuid, device_serial, model, transport, total_size,
+                first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7, ?7)",
+            params![
+                input.stable_uid,
+                input.media_uuid,
+                input.device_serial,
+                input.model,
+                input.transport,
+                input.total_size,
+                timestamp
+            ],
+        )?;
+        self.physical_device_by_id(self.connection.last_insert_rowid())
+    }
+
+    pub fn physical_device_by_id(&self, id: i64) -> Result<PhysicalDevice> {
+        self.connection
+            .query_row(
+                "SELECT id, stable_uid, media_uuid, device_serial, model, transport, total_size,
+                        first_seen_at, last_seen_at FROM physical_devices WHERE id = ?1",
+                [id],
+                row_to_physical_device,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("未找到物理设备 ID {id}"))
+    }
+
     pub fn volume_by_id(&self, id: i64) -> Result<Volume> {
         self.connection
             .query_row(
                 "SELECT id, volume_uid, marker_uid, volume_name, filesystem, mount_path,
-                        system_volume_uuid, device_serial, partition_uuid, total_size, role,
-                        is_online, first_seen_at, last_seen_at
+                        system_volume_uuid, device_serial, partition_uuid, total_size, physical_device_id,
+                        identity_state, role, is_online, first_seen_at, last_seen_at
                  FROM volumes WHERE id = ?1",
                 [id],
                 row_to_volume,
@@ -209,8 +396,8 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT id, volume_uid, marker_uid, volume_name, filesystem, mount_path,
-                        system_volume_uuid, device_serial, partition_uuid, total_size, role,
-                        is_online, first_seen_at, last_seen_at
+                        system_volume_uuid, device_serial, partition_uuid, total_size, physical_device_id,
+                        identity_state, role, is_online, first_seen_at, last_seen_at
                  FROM volumes WHERE volume_uid = ?1",
                 [uid],
                 row_to_volume,
@@ -219,17 +406,234 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn volumes_by_marker(&self, marker_uid: &str) -> Result<Vec<Volume>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, volume_uid, marker_uid, volume_name, filesystem, mount_path,
+                    system_volume_uuid, device_serial, partition_uuid, total_size, physical_device_id,
+                    identity_state, role, is_online, first_seen_at, last_seen_at
+             FROM volumes WHERE marker_uid = ?1 ORDER BY id",
+        )?;
+        statement
+            .query_map([marker_uid], row_to_volume)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     pub fn volumes(&self) -> Result<Vec<Volume>> {
         let mut statement = self.connection.prepare(
             "SELECT id, volume_uid, marker_uid, volume_name, filesystem, mount_path,
-                    system_volume_uuid, device_serial, partition_uuid, total_size, role,
-                    is_online, first_seen_at, last_seen_at
+                    system_volume_uuid, device_serial, partition_uuid, total_size, physical_device_id,
+                    identity_state, role, is_online, first_seen_at, last_seen_at
              FROM volumes ORDER BY volume_name, id",
         )?;
         statement
             .query_map([], row_to_volume)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn record_volume_conflict(
+        &mut self,
+        input: VolumeConflictInput<'_>,
+    ) -> Result<VolumeIdentityConflict> {
+        let candidate_root = path_bytes(input.candidate_root);
+        let existing_open: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM volume_identity_conflicts
+                 WHERE existing_volume_id = ?1 AND candidate_mount_path = ?2 AND state = 'open'",
+                params![input.existing_volume_id, candidate_root],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing_open {
+            self.connection.execute(
+                "UPDATE volume_identity_conflicts SET candidate_marker_uid = ?1,
+                    candidate_filesystem = ?2, candidate_system_volume_uuid = ?3,
+                    candidate_partition_uuid = ?4, candidate_media_uuid = ?5,
+                    candidate_device_serial = ?6, candidate_total_size = ?7,
+                    candidate_physical_device_id = ?8, updated_at = ?9 WHERE id = ?10",
+                params![
+                    input.candidate_marker_uid,
+                    input.candidate_filesystem,
+                    input.candidate_system_volume_uuid,
+                    input.candidate_partition_uuid,
+                    input.candidate_media_uuid,
+                    input.candidate_device_serial,
+                    input.candidate_total_size,
+                    input.candidate_physical_device_id,
+                    now(),
+                    id
+                ],
+            )?;
+            return self.volume_conflict_by_id(id);
+        }
+        let timestamp = now();
+        self.connection.execute(
+            "INSERT INTO volume_identity_conflicts (
+                existing_volume_id, candidate_marker_uid, candidate_mount_path,
+                candidate_mount_path_display, candidate_filesystem, candidate_system_volume_uuid,
+                candidate_partition_uuid, candidate_media_uuid, candidate_device_serial,
+                candidate_total_size, candidate_physical_device_id, state, detected_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12, ?12, ?12)",
+            params![
+                input.existing_volume_id,
+                input.candidate_marker_uid,
+                candidate_root,
+                display_path(input.candidate_root),
+                input.candidate_filesystem,
+                input.candidate_system_volume_uuid,
+                input.candidate_partition_uuid,
+                input.candidate_media_uuid,
+                input.candidate_device_serial,
+                input.candidate_total_size,
+                input.candidate_physical_device_id,
+                timestamp
+            ],
+        )?;
+        let conflict_id = self.connection.last_insert_rowid();
+        self.record_volume_event(
+            Some(input.existing_volume_id),
+            Some(conflict_id),
+            "marker_conflict_detected",
+            None,
+            Some(json!({"candidate_path": display_path(input.candidate_root)})),
+        )?;
+        self.volume_conflict_by_id(conflict_id)
+    }
+
+    pub fn volume_conflict_by_id(&self, id: i64) -> Result<VolumeIdentityConflict> {
+        self.connection
+            .query_row(
+                "SELECT c.id, c.existing_volume_id, v.volume_uid, c.candidate_marker_uid,
+                        c.candidate_mount_path, c.candidate_filesystem, c.candidate_system_volume_uuid,
+                        c.candidate_partition_uuid, c.candidate_media_uuid, c.candidate_device_serial,
+                        c.candidate_total_size, c.candidate_physical_device_id, c.state, c.resolution,
+                        c.resolved_volume_id, c.detected_at, c.resolved_at
+                 FROM volume_identity_conflicts c JOIN volumes v ON v.id = c.existing_volume_id
+                 WHERE c.id = ?1",
+                [id],
+                row_to_volume_conflict,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("未找到卷身份冲突 ID {id}"))
+    }
+
+    pub fn open_volume_conflicts(&self) -> Result<Vec<VolumeIdentityConflict>> {
+        let mut statement = self.connection.prepare(
+            "SELECT c.id, c.existing_volume_id, v.volume_uid, c.candidate_marker_uid,
+                    c.candidate_mount_path, c.candidate_filesystem, c.candidate_system_volume_uuid,
+                    c.candidate_partition_uuid, c.candidate_media_uuid, c.candidate_device_serial,
+                    c.candidate_total_size, c.candidate_physical_device_id, c.state, c.resolution,
+                    c.resolved_volume_id, c.detected_at, c.resolved_at
+             FROM volume_identity_conflicts c JOIN volumes v ON v.id = c.existing_volume_id
+             WHERE c.state = 'open' ORDER BY c.detected_at DESC, c.id DESC",
+        )?;
+        statement
+            .query_map([], row_to_volume_conflict)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn record_volume_event(
+        &mut self,
+        volume_id: Option<i64>,
+        conflict_id: Option<i64>,
+        event_type: &str,
+        old_value: Option<serde_json::Value>,
+        new_value: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO volume_events(volume_id, conflict_id, event_type, old_value_json, new_value_json, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                volume_id,
+                conflict_id,
+                event_type,
+                old_value.map(|value| value.to_string()),
+                new_value.map(|value| value.to_string()),
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn resolve_conflict_as_new_volume(
+        &mut self,
+        conflict_id: i64,
+        volume_uid: &str,
+        role: VolumeRole,
+    ) -> Result<Volume> {
+        let transaction = self.connection.transaction()?;
+        let conflict = transaction
+            .query_row(
+                "SELECT c.id, c.existing_volume_id, v.volume_uid, c.candidate_marker_uid,
+                        c.candidate_mount_path, c.candidate_filesystem, c.candidate_system_volume_uuid,
+                        c.candidate_partition_uuid, c.candidate_media_uuid, c.candidate_device_serial,
+                        c.candidate_total_size, c.candidate_physical_device_id, c.state, c.resolution,
+                        c.resolved_volume_id, c.detected_at, c.resolved_at
+                 FROM volume_identity_conflicts c JOIN volumes v ON v.id = c.existing_volume_id
+                 WHERE c.id = ?1",
+                [conflict_id],
+                row_to_volume_conflict,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("未找到卷身份冲突 ID {conflict_id}"))?;
+        if conflict.state != "open" {
+            bail!("卷身份冲突 {conflict_id} 已处理，不能重复解决");
+        }
+        let timestamp = now();
+        let volume_name = conflict
+            .candidate_mount_path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || display_path(&conflict.candidate_mount_path),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        transaction.execute(
+            "INSERT INTO volumes (
+                volume_uid, marker_uid, volume_name, filesystem, mount_path, mount_path_display,
+                system_volume_uuid, device_serial, partition_uuid, total_size, role, is_online,
+                physical_device_id, identity_state, first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12, 'possible_clone',
+                       ?13, ?13, ?13, ?13)",
+            params![
+                volume_uid,
+                conflict.candidate_marker_uid,
+                volume_name,
+                conflict.candidate_filesystem,
+                path_bytes(&conflict.candidate_mount_path),
+                display_path(&conflict.candidate_mount_path),
+                conflict.candidate_system_volume_uuid,
+                conflict.candidate_device_serial,
+                conflict.candidate_partition_uuid,
+                conflict.candidate_total_size,
+                role.as_str(),
+                conflict.candidate_physical_device_id,
+                timestamp
+            ],
+        )?;
+        let new_volume_id = transaction.last_insert_rowid();
+        transaction.execute(
+            "UPDATE volume_identity_conflicts SET state = 'resolved', resolution = 'as_new_volume',
+                resolved_volume_id = ?1, resolved_at = ?2, updated_at = ?2 WHERE id = ?3",
+            params![new_volume_id, timestamp, conflict_id],
+        )?;
+        let details =
+            json!({"new_volume_id": new_volume_id, "resolution": "as_new_volume"}).to_string();
+        transaction.execute(
+            "INSERT INTO volume_events(volume_id, conflict_id, event_type, old_value_json, new_value_json, occurred_at)
+             VALUES (?1, ?2, 'marker_conflict_resolved_as_new_volume', NULL, ?3, ?4)",
+            params![conflict.existing_volume_id, conflict_id, details, timestamp],
+        )?;
+        transaction.execute(
+            "INSERT INTO volume_events(volume_id, conflict_id, event_type, old_value_json, new_value_json, occurred_at)
+             VALUES (?1, ?2, 'volume_created_from_marker_conflict', NULL, ?3, ?4)",
+            params![new_volume_id, conflict_id, json!({"source_volume_id": conflict.existing_volume_id}).to_string(), timestamp],
+        )?;
+        transaction.commit()?;
+        self.volume_by_id(new_volume_id)
     }
 
     pub fn refresh_volume_online_states(&mut self) -> Result<()> {
@@ -712,7 +1116,8 @@ fn insert_event(
 }
 
 fn row_to_volume(row: &Row<'_>) -> rusqlite::Result<Volume> {
-    let role: String = row.get(10)?;
+    let identity_state: String = row.get(11)?;
+    let role: String = row.get(12)?;
     Ok(Volume {
         id: row.get(0)?,
         volume_uid: row.get(1)?,
@@ -724,10 +1129,50 @@ fn row_to_volume(row: &Row<'_>) -> rusqlite::Result<Volume> {
         device_serial: row.get(7)?,
         partition_uuid: row.get(8)?,
         total_size: row.get(9)?,
+        physical_device_id: row.get(10)?,
+        identity_state: identity_state
+            .parse()
+            .unwrap_or(VolumeIdentityState::Fallback),
         role: role.parse().unwrap_or(VolumeRole::Unknown),
-        is_online: row.get::<_, i64>(11)? != 0,
-        first_seen_at: row.get(12)?,
-        last_seen_at: row.get(13)?,
+        is_online: row.get::<_, i64>(13)? != 0,
+        first_seen_at: row.get(14)?,
+        last_seen_at: row.get(15)?,
+    })
+}
+
+fn row_to_physical_device(row: &Row<'_>) -> rusqlite::Result<PhysicalDevice> {
+    Ok(PhysicalDevice {
+        id: row.get(0)?,
+        stable_uid: row.get(1)?,
+        media_uuid: row.get(2)?,
+        device_serial: row.get(3)?,
+        model: row.get(4)?,
+        transport: row.get(5)?,
+        total_size: row.get(6)?,
+        first_seen_at: row.get(7)?,
+        last_seen_at: row.get(8)?,
+    })
+}
+
+fn row_to_volume_conflict(row: &Row<'_>) -> rusqlite::Result<VolumeIdentityConflict> {
+    Ok(VolumeIdentityConflict {
+        id: row.get(0)?,
+        existing_volume_id: row.get(1)?,
+        existing_volume_uid: row.get(2)?,
+        candidate_marker_uid: row.get(3)?,
+        candidate_mount_path: path_from_bytes(&row.get::<_, Vec<u8>>(4)?),
+        candidate_filesystem: row.get(5)?,
+        candidate_system_volume_uuid: row.get(6)?,
+        candidate_partition_uuid: row.get(7)?,
+        candidate_media_uuid: row.get(8)?,
+        candidate_device_serial: row.get(9)?,
+        candidate_total_size: row.get(10)?,
+        candidate_physical_device_id: row.get(11)?,
+        state: row.get(12)?,
+        resolution: row.get(13)?,
+        resolved_volume_id: row.get(14)?,
+        detected_at: row.get(15)?,
+        resolved_at: row.get(16)?,
     })
 }
 

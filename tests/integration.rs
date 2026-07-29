@@ -3,11 +3,20 @@ use std::fs;
 use disk_indexer::config::Config;
 use disk_indexer::db::Database;
 use disk_indexer::duplicate::{DuplicateFilter, duplicate_groups, lookup};
-use disk_indexer::model::VolumeRole;
+use disk_indexer::model::{Volume, VolumeRole};
 use disk_indexer::report::{create_cleanup_plan, duplicate_report, write_csv};
 use disk_indexer::scanner::{ScanOptions, scan};
-use disk_indexer::volume::{MarkerPolicy, register_volume};
+use disk_indexer::volume::{
+    MarkerPolicy, VolumeIdentityInput, register_volume, register_volume_with_identity,
+    resolve_conflict_as_new_volume,
+};
 use tempfile::tempdir;
+
+fn registered(registration: disk_indexer::volume::VolumeRegistration) -> Volume {
+    registration
+        .volume
+        .expect("注册结果应包含一个可安全使用的卷")
+}
 
 #[test]
 fn indexes_duplicates_incrementally_and_keeps_offline_history() {
@@ -25,56 +34,44 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
 
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    assert_eq!(database.schema_version().expect("schema"), 1);
-    let a = register_volume(
-        &mut database,
-        &volume_a,
-        VolumeRole::Primary,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("register a")
-    .volume;
-    let a_again = register_volume(
-        &mut database,
-        &volume_a,
-        VolumeRole::Primary,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("same volume identity")
-    .volume;
-    assert_eq!(a.id, a_again.id);
-    let collision_root = temp.path().join("marker-collision");
-    fs::create_dir_all(&collision_root).expect("collision root");
-    fs::copy(
-        volume_a.join(".disk-indexer-volume-id"),
-        collision_root.join(".disk-indexer-volume-id"),
-    )
-    .expect("copy marker for collision test");
-    assert!(
+    assert_eq!(database.schema_version().expect("schema"), 2);
+    let a = registered(
         register_volume(
             &mut database,
-            &collision_root,
-            VolumeRole::Unknown,
+            &volume_a,
+            VolumeRole::Primary,
             MarkerPolicy::WriteIfPossible,
         )
-        .is_err()
+        .expect("register a"),
     );
-    let b = register_volume(
-        &mut database,
-        &volume_b,
-        VolumeRole::LegacyBackup,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("register b")
-    .volume;
-    let c = register_volume(
-        &mut database,
-        &volume_c,
-        VolumeRole::LocalBackup,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("register c")
-    .volume;
+    let a_again = registered(
+        register_volume(
+            &mut database,
+            &volume_a,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("same volume identity"),
+    );
+    assert_eq!(a.id, a_again.id);
+    let b = registered(
+        register_volume(
+            &mut database,
+            &volume_b,
+            VolumeRole::LegacyBackup,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register b"),
+    );
+    let c = registered(
+        register_volume(
+            &mut database,
+            &volume_c,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register c"),
+    );
 
     assert_eq!(
         scan(&mut database, &config, &a, &ScanOptions::default())
@@ -169,6 +166,200 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
 }
 
 #[test]
+fn offline_marker_clone_is_never_merged_and_can_be_resolved_as_new_volume() {
+    let temp = tempdir().expect("temporary root");
+    let original_path = temp.path().join("original");
+    let clone_path = temp.path().join("clone");
+    fs::create_dir_all(&original_path).expect("original directory");
+    fs::create_dir_all(&clone_path).expect("clone directory");
+    let original_canonical = original_path.canonicalize().expect("canonical original");
+    let clone_canonical = clone_path.canonicalize().expect("canonical clone");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let original_identity = VolumeIdentityInput {
+        filesystem: "apfs".to_owned(),
+        system_volume_uuid: Some("volume-a".to_owned()),
+        partition_uuid: Some("partition-a".to_owned()),
+        media_uuid: Some("media-a".to_owned()),
+        device_serial: Some("serial-a".to_owned()),
+        model: Some("Test Disk".to_owned()),
+        transport: Some("USB".to_owned()),
+        total_size: Some(1_000),
+    };
+    let original = registered(
+        register_volume_with_identity(
+            &mut database,
+            &original_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(original_identity),
+        )
+        .expect("register original"),
+    );
+    fs::copy(
+        original_path.join(".disk-indexer-volume-id"),
+        clone_path.join(".disk-indexer-volume-id"),
+    )
+    .expect("copy marker like a disk clone");
+    let offline_path = temp.path().join("original-offline");
+    fs::rename(&original_path, &offline_path).expect("detach original");
+    database
+        .refresh_volume_online_states()
+        .expect("refresh offline state");
+
+    let clone_registration = register_volume_with_identity(
+        &mut database,
+        &clone_path,
+        VolumeRole::LocalBackup,
+        MarkerPolicy::DoNotWrite,
+        Some(VolumeIdentityInput {
+            filesystem: "apfs".to_owned(),
+            system_volume_uuid: Some("volume-b".to_owned()),
+            partition_uuid: Some("partition-b".to_owned()),
+            media_uuid: Some("media-b".to_owned()),
+            device_serial: Some("serial-b".to_owned()),
+            model: Some("Clone Disk".to_owned()),
+            transport: Some("USB".to_owned()),
+            total_size: Some(1_000),
+        }),
+    )
+    .expect("clone registration returns a safe status");
+    assert!(clone_registration.volume.is_none());
+    let conflict = clone_registration
+        .conflict
+        .expect("possible clone conflict");
+    assert_eq!(conflict.existing_volume_id, original.id);
+    assert_eq!(
+        database
+            .volume_by_id(original.id)
+            .expect("original volume")
+            .mount_path,
+        original_canonical
+    );
+    assert!(
+        !database
+            .volume_by_id(original.id)
+            .expect("original volume")
+            .is_online
+    );
+    assert_eq!(
+        database
+            .open_volume_conflicts()
+            .expect("open conflicts")
+            .len(),
+        1
+    );
+
+    let resolved =
+        resolve_conflict_as_new_volume(&mut database, conflict.id, VolumeRole::LocalBackup)
+            .expect("resolve as a distinct volume");
+    assert_ne!(resolved.id, original.id);
+    assert_ne!(resolved.volume_uid, original.volume_uid);
+    assert_eq!(resolved.marker_uid, original.marker_uid);
+    assert_eq!(resolved.mount_path, clone_canonical);
+    assert!(
+        database
+            .open_volume_conflicts()
+            .expect("resolved conflicts")
+            .is_empty()
+    );
+}
+
+#[test]
+fn matching_stable_identity_allows_an_offline_volume_to_relink() {
+    let temp = tempdir().expect("temporary root");
+    let first_path = temp.path().join("first-mount");
+    let second_path = temp.path().join("second-mount");
+    fs::create_dir_all(&first_path).expect("first mount");
+    fs::create_dir_all(&second_path).expect("second mount");
+    let second_canonical = second_path.canonicalize().expect("canonical second mount");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let stable_identity = || VolumeIdentityInput {
+        filesystem: "apfs".to_owned(),
+        system_volume_uuid: Some("stable-volume".to_owned()),
+        partition_uuid: Some("stable-partition".to_owned()),
+        media_uuid: Some("stable-media".to_owned()),
+        device_serial: Some("stable-serial".to_owned()),
+        model: None,
+        transport: None,
+        total_size: Some(2_000),
+    };
+    let first = registered(
+        register_volume_with_identity(
+            &mut database,
+            &first_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(stable_identity()),
+        )
+        .expect("first mount"),
+    );
+    fs::copy(
+        first_path.join(".disk-indexer-volume-id"),
+        second_path.join(".disk-indexer-volume-id"),
+    )
+    .expect("same logical volume marker");
+    fs::rename(&first_path, temp.path().join("first-offline")).expect("offline first mount");
+    let relinked = registered(
+        register_volume_with_identity(
+            &mut database,
+            &second_path,
+            VolumeRole::Primary,
+            MarkerPolicy::DoNotWrite,
+            Some(stable_identity()),
+        )
+        .expect("stable re-registration"),
+    );
+    assert_eq!(relinked.id, first.id);
+    assert_eq!(relinked.mount_path, second_canonical);
+    assert!(
+        database
+            .open_volume_conflicts()
+            .expect("no conflict")
+            .is_empty()
+    );
+}
+
+#[test]
+fn migration_backfills_physical_device_for_existing_volume_history() {
+    let temp = tempdir().expect("temporary root");
+    let database_path = temp.path().join("legacy.db");
+    let connection = rusqlite::Connection::open(&database_path).expect("legacy database");
+    connection
+        .execute_batch(include_str!("../migrations/0001_initial.sql"))
+        .expect("initial schema");
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migrations(version, applied_at) VALUES ('0001_initial', '2026-01-01T00:00:00Z');",
+        )
+        .expect("legacy migration marker");
+    connection
+        .execute(
+            "INSERT INTO volumes (
+                volume_uid, marker_uid, volume_name, filesystem, mount_path, mount_path_display,
+                system_volume_uuid, device_serial, partition_uuid, total_size, role, is_online,
+                first_seen_at, last_seen_at, created_at, updated_at
+             ) VALUES (?1, NULL, 'legacy', 'apfs', ?2, '/legacy', 'volume-legacy', 'media-legacy',
+                       'partition-legacy', 4096, 'primary', 0, 't', 't', 't', 't')",
+            rusqlite::params!["legacy:volume", b"/legacy".to_vec()],
+        )
+        .expect("legacy volume");
+    drop(connection);
+
+    let config = Config::new(Some(database_path)).expect("config");
+    let database = Database::open(&config).expect("migrate legacy database");
+    assert_eq!(database.schema_version().expect("schema version"), 2);
+    let volume = database
+        .volume_by_uid("legacy:volume")
+        .expect("volume lookup")
+        .expect("legacy volume");
+    assert!(volume.physical_device_id.is_some());
+    assert_eq!(volume.identity_state.as_str(), "verified");
+}
+
+#[test]
 fn interrupted_scan_can_be_resumed() {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -179,14 +370,15 @@ fn interrupted_scan_can_be_resumed() {
     fs::write(volume_path.join("file"), b"data").expect("file");
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    let volume = register_volume(
-        &mut database,
-        &volume_path,
-        VolumeRole::Unknown,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("registration")
-    .volume;
+    let volume = registered(
+        register_volume(
+            &mut database,
+            &volume_path,
+            VolumeRole::Unknown,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("registration"),
+    );
     let cancelled = Arc::new(AtomicBool::new(true));
     let interrupted = scan(
         &mut database,
@@ -232,14 +424,15 @@ fn scans_non_utf8_path_without_panicking() {
     }
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    let registered = register_volume(
-        &mut database,
-        &volume,
-        VolumeRole::Unknown,
-        MarkerPolicy::WriteIfPossible,
-    )
-    .expect("registration")
-    .volume;
+    let registered = registered(
+        register_volume(
+            &mut database,
+            &volume,
+            VolumeRole::Unknown,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("registration"),
+    );
     let summary = scan(&mut database, &config, &registered, &ScanOptions::default()).expect("scan");
     assert_eq!(summary.discovered_count, 1);
 }

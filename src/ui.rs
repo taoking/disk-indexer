@@ -152,10 +152,17 @@ async fn add_volume(State(state): State<UiState>, Json(request): Json<VolumeRequ
     let registration =
         register_volume(&mut database, &request.path, role, policy).map_err(api_error)?;
     Ok(Json(json!({
-        "volume": volume_json(&registration.volume),
+        "volume": registration.volume.as_ref().map(volume_json),
         "marker_uid": registration.marker_uid,
         "writable": registration.writable,
         "used_fallback_identity": registration.used_fallback_identity,
+        "identity_state": registration.identity_state.as_str(),
+        "identity_conflict": registration.conflict.as_ref().map(|conflict| json!({
+            "id": conflict.id,
+            "state": conflict.state,
+            "existing_volume_id": conflict.existing_volume_id,
+            "candidate_mount_path": conflict.candidate_mount_path.to_string_lossy(),
+        })),
     })))
 }
 
@@ -174,14 +181,17 @@ async fn scan_volume(State(state): State<UiState>, Json(request): Json<ScanReque
         .map_err(api_error)?
         .filter(|volume| volume.mount_path == canonical_root)
         .map_or(VolumeRole::Unknown, |volume| volume.role);
-    let volume = register_volume(
+    let registration = register_volume(
         &mut database,
         &canonical_root,
         role,
         MarkerPolicy::WriteIfPossible,
     )
-    .map_err(api_error)?
-    .volume;
+    .map_err(api_error)?;
+    let volume = registration
+        .volume
+        .context("检测到 possible_clone；请先审核卷身份冲突")
+        .map_err(api_error)?;
     let summary = scan(
         &mut database,
         &state.config,

@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 9.1（回归基线）已完成；下一步是 Phase 9.2（身份安全修复）。本轮目标是先解决 P0 文件身份和缓存安全问题，再以 SwiftUI 原生 App 完全替代浏览器 UI。
+Phase 9.2（身份安全修复）已完成；下一步是 Phase 9.3（索引和清理安全增强）。本轮目标是先解决 P0 文件身份和缓存安全问题，再以 SwiftUI 原生 App 完全替代浏览器 UI。
 
 ## 已完成
 
@@ -17,10 +17,10 @@ Phase 9.1（回归基线）已完成；下一步是 Phase 9.2（身份安全修�
 - 完成三卷 CLI 验收：3 副本重复组、精确 lookup、候选/blocked 清理计划、离线保留和增量复用均已验证。
 - 完成本机 UI、展示页、UI API 单测和详细使用说明。
 - Phase 9.1：已从 `origin/main` 快进核验，阅读现有代码/文档，运行 Rust 基线质量门并确认当前 GitHub Actions 为绿色。
+- Phase 9.2：新增 `0002_volume_identity_safety`；引入 `physical_devices`、`volumes.physical_device_id`、`identity_state`、冲突/卷审计表和旧历史回填。相同 marker 在稳定身份冲突或无法证明一致时返回 `possible_clone`，即使原卷离线也绝不覆盖；新增 `volume conflicts`、`volume resolve --as-new-volume` 和受稳定身份约束的 `volume relink`。自动化覆盖离线克隆、稳定重挂载和旧数据库迁移。
 
 ## 待完成
 
-- Phase 9.2：physical devices、marker 克隆冲突、人工 relink/resolve 和审计事件。
 - Phase 9.3：stale lookup、状态过滤、硬链接、清理计划验证。
 - Phase 9.4：分页、JSONL 任务协议和任务取消。
 - Phase 10.1：完全移除浏览器 UI、HTTP 服务和端口监听。
@@ -32,7 +32,7 @@ Phase 9.1（回归基线）已完成；下一步是 Phase 9.2（身份安全修�
 
 - 数据库迁移保存在 `migrations/`，由 `schema_migrations` 逐个记录版本。
 - 所有数据库路径字段以 BLOB 保存 Unix 原始字节，并保存仅用于展示的 lossy 文本；非 Unix 平台使用可逆 UTF-8/系统字符串回退。
-- 卷优先使用根目录 `.disk-indexer-volume-id` 中的 UUID；无法写入时使用设备号、文件系统和容量的保守回退标识。身份冲突只报告，绝不合并记录。
+- marker 只能证明“可能是同一逻辑卷”。注册时会比较卷/分区/media UUID、设备身份、容量、文件系统和历史物理设备；稳定身份不一致或缺失且路径不同均创建可审计的 `possible_clone`，绝不合并记录。既有卷在升级时会回填物理设备分组。
 - 完整 BLAKE3 且文件大小一致才构成重复组；抽样哈希只能缩小候选集合。
 - CLI 不含删除或移动文件代码路径；清理功能只输出 JSON 计划。
 - UI 用 `axum` 提供静态展示页及操作 API，但严格绑定 `127.0.0.1`；每个请求使用短生命周期 SQLite 连接，避免跨异步任务共享连接。
@@ -44,6 +44,7 @@ Phase 9.1（回归基线）已完成；下一步是 Phase 9.2（身份安全修�
 - 扫描 `--resume` 通过已持久化元数据和幂等增量扫描恢复，不保存脆弱的目录遍历栈。
 - 本机 UI 没有认证机制，因此绝不可通过端口转发或反向代理暴露到局域网/公网。
 - Phase 9.1 基线：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 已于 2026-07-29 通过（9 单元测试、3 集成测试）；当前尚无 Swift/Xcode 项目，因此 Swift build/test 门在本阶段不适用。Xcode 26.6 和 Swift 6.3.3 已验证可用。
+- Phase 9.2 的 CLI 冲突返回是安全状态而不是异常；调用方必须检查 `volume` 是否为 null/缺失并引导用户先审核冲突。Phase 10 移除浏览器 UI 前，旧 UI 仍在编译，但已同步适配为不会扫描 `possible_clone`。
 
 ## 发布记录
 

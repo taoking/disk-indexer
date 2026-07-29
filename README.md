@@ -6,7 +6,7 @@
 
 ## 当前能力
 
-- 注册卷并优先写入隐藏 UUID 标记；不以卷名作为身份。
+- 注册卷并优先写入隐藏 UUID 标记；marker 只代表“可能是同一逻辑卷”，还会校验稳定设备身份。
 - 扫描普通文件、保存原始路径字节、默认不跟随符号链接。
 - 复用大小、纳秒修改时间、inode 和设备号均不变的已有哈希。
 - 用 BLAKE3 抽样缩小候选，再用完整 BLAKE3 + 文件大小确认重复。
@@ -31,6 +31,7 @@ cargo build --release
 disk-indexer init
 disk-indexer volume add /Volumes/Photos --role primary
 disk-indexer volume list
+disk-indexer volume conflicts
 disk-indexer scan /Volumes/Photos
 disk-indexer hash complete --all
 disk-indexer duplicates --csv duplicates.csv
@@ -40,6 +41,20 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
   --min-remaining-copies 2 --output cleanup-plan.json
 disk-indexer ui
 ```
+
+### 卷身份冲突
+
+若某块已注册硬盘离线后，另一块硬盘带着相同的 `.disk-indexer-volume-id` 出现，工具不会覆盖离线卷记录，也不会自动开始扫描候选盘。`volume add --json` 会返回 `possible_clone` 和冲突 ID；先审核 `disk-indexer volume conflicts`，再明确执行：
+
+```bash
+# 确认候选盘是独立克隆盘：保留成新的内部卷记录，不合并历史
+disk-indexer volume resolve --conflict 12 --as-new-volume --role local_backup
+
+# 确认同一块盘只是换了挂载路径：只有稳定设备身份一致时才允许重连
+disk-indexer volume relink --volume 3 --path /Volumes/Photos
+```
+
+两条命令都会写入本地 SQLite 审计事件。没有稳定设备 UUID/序列号可验证时，重连会被拒绝；此时应保留冲突并人工核对硬盘。
 
 首次扫描建议先逐卷运行普通 `scan`，让工具只对同大小候选读取内容；需要“任意新文件都可快速精确比对”时，再分批运行 `hash complete --volume <id>`。
 

@@ -43,6 +43,45 @@ impl std::str::FromStr for VolumeRole {
     }
 }
 
+/// 卷身份判定的可信程度。`possible_clone` 绝不参与自动合并。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeIdentityState {
+    Verified,
+    Fallback,
+    PossibleClone,
+    Conflict,
+    ManualLink,
+}
+
+impl VolumeIdentityState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Fallback => "fallback",
+            Self::PossibleClone => "possible_clone",
+            Self::Conflict => "conflict",
+            Self::ManualLink => "manual_link",
+        }
+    }
+}
+
+impl std::str::FromStr for VolumeIdentityState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "verified" => Ok(Self::Verified),
+            "fallback" => Ok(Self::Fallback),
+            "possible_clone" => Ok(Self::PossibleClone),
+            "conflict" => Ok(Self::Conflict),
+            "manual_link" => Ok(Self::ManualLink),
+            _ => Err(format!("不支持的卷身份状态: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Volume {
     pub id: i64,
@@ -55,10 +94,46 @@ pub struct Volume {
     pub device_serial: Option<String>,
     pub partition_uuid: Option<String>,
     pub total_size: Option<i64>,
+    pub physical_device_id: Option<i64>,
+    pub identity_state: VolumeIdentityState,
     pub role: VolumeRole,
     pub is_online: bool,
     pub first_seen_at: String,
     pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalDevice {
+    pub id: i64,
+    pub stable_uid: String,
+    pub media_uuid: Option<String>,
+    pub device_serial: Option<String>,
+    pub model: Option<String>,
+    pub transport: Option<String>,
+    pub total_size: Option<i64>,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VolumeIdentityConflict {
+    pub id: i64,
+    pub existing_volume_id: i64,
+    pub existing_volume_uid: String,
+    pub candidate_marker_uid: Option<String>,
+    pub candidate_mount_path: PathBuf,
+    pub candidate_filesystem: Option<String>,
+    pub candidate_system_volume_uuid: Option<String>,
+    pub candidate_partition_uuid: Option<String>,
+    pub candidate_media_uuid: Option<String>,
+    pub candidate_device_serial: Option<String>,
+    pub candidate_total_size: Option<i64>,
+    pub candidate_physical_device_id: Option<i64>,
+    pub state: String,
+    pub resolution: Option<String>,
+    pub resolved_volume_id: Option<i64>,
+    pub detected_at: String,
+    pub resolved_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]

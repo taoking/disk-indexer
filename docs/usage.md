@@ -34,6 +34,25 @@ disk-indexer hash complete --all
 
 卷角色可选 `primary`、`local_backup`、`offsite_backup`、`temporary`、`legacy_backup` 和 `unknown`。可写卷默认创建 `.disk-indexer-volume-id`，确保重挂载后仍能识别同一卷。只读卷使用保守系统身份回退；无法得到稳定身份时不会冒险合并记录。
 
+同一个 marker 不是同一块物理盘的充分证明。若命令输出 `possible_clone`，候选路径没有被写入或合并到历史卷，扫描也会停止。先查看冲突：
+
+```bash
+disk-indexer volume conflicts
+disk-indexer volume conflicts --json
+```
+
+确认它是独立克隆盘后，保留为新卷（不会修改原卷记录）：
+
+```bash
+disk-indexer volume resolve --conflict 12 --as-new-volume --role local_backup
+```
+
+确认它只是同一块盘的新挂载路径时，可以请求重连；CLI 会再次比较稳定 UUID/设备身份，不一致或缺失时会拒绝：
+
+```bash
+disk-indexer volume relink --volume 3 --path /Volumes/Photos
+```
+
 ## 3. 使用浏览器 UI
 
 ```bash
@@ -59,6 +78,9 @@ UI 严格监听 `127.0.0.1`，没有认证、外网监听、云同步或遥测�
 disk-indexer volume list
 disk-indexer volume show 1
 disk-indexer volume add /Volumes/Photos --role primary --no-write-marker
+disk-indexer volume conflicts --json
+disk-indexer volume resolve --conflict 12 --as-new-volume
+disk-indexer volume relink --volume 3 --path /Volumes/Photos
 
 # 扫描
 disk-indexer scan /Volumes/Photos --exclude '*.tmp'
