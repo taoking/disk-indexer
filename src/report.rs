@@ -317,6 +317,16 @@ pub fn create_cleanup_plan_with_options(
                 candidate_delete,
                 keep_candidates,
                 all_known_copies: all_known_copies.clone(),
+                all_remaining_candidates: remaining_online.iter().map(|copy| (*copy).clone()).collect(),
+                verified_remaining_copies: Vec::new(),
+                failed_remaining_copies: Vec::new(),
+                unknown_identity_copies: remaining_online
+                    .iter()
+                    .filter(|copy| {
+                        copy.physical_identity_state != PhysicalDeviceIdentityState::Verified
+                    })
+                    .map(|copy| (*copy).clone())
+                    .collect(),
                 generated_at: generated_at.clone(),
                 database_schema_version: schema_version,
                 status: if blocked_reasons.is_empty() {
@@ -330,8 +340,14 @@ pub fn create_cleanup_plan_with_options(
                 remaining_storage_objects: remaining_storage_objects.len(),
                 remaining_volumes: remaining_volumes.len(),
                 remaining_physical_devices: remaining_physical_devices.len(),
+                verified_remaining_path_copies: 0,
+                verified_remaining_storage_objects: 0,
+                verified_remaining_logical_volumes: 0,
+                verified_remaining_physical_devices: 0,
                 candidate_metadata_state: "unverified".to_owned(),
                 keeper_metadata_state: "unverified".to_owned(),
+                verification_failures: Vec::new(),
+                physical_identity_warnings: Vec::new(),
                 blocked_reasons,
                 risk_notice: "本计划只提供人工审核候选项，工具不会删除、移动或修改原始文件。内容重复不等于备份冗余。".to_owned(),
             });
@@ -346,7 +362,12 @@ pub fn create_cleanup_plan_with_options(
         min_remaining_copies,
         min_remaining_physical_devices: options.min_remaining_physical_devices,
         verification_mode: "none".to_owned(),
+        verification_protocol_version: 1,
         verified_at: None,
+        cancelled: false,
+        completed_items: 0,
+        blocked_items: 0,
+        verified_items: 0,
         warnings: vec![
             "计划只依据当前数据库和在线状态；生成后应在人工操作前再次验证文件。".to_owned(),
             "该工具没有也不会在本阶段提供永久删除或移动命令。".to_owned(),
@@ -363,6 +384,8 @@ pub fn create_cleanup_plan_with_verification(
     min_remaining_copies: usize,
     options: CleanupVerificationOptions,
 ) -> Result<CleanupPlan> {
+    // 调用方即使遗漏刷新在线状态，严格模式也绝不能把已卸载卷计入剩余副本。
+    database.refresh_volume_online_states()?;
     let mut plan = create_cleanup_plan_with_options(
         database,
         target_volume_id,
@@ -379,48 +402,214 @@ pub fn create_cleanup_plan_with_verification(
         "metadata"
     };
     let verified_at = now();
+    let mut verification_cache = std::collections::HashMap::new();
     for item in &mut plan.items {
         item.verification_mode = verification_mode.to_owned();
         item.verified_at = Some(verified_at.clone());
-        let candidate_result = database
-            .file_record_by_id(item.candidate_delete.file_copy_id)?
-            .context("清理候选记录不存在")
-            .and_then(|record| verify_record(database, config, &record, options.verify_full_hash));
-        item.candidate_metadata_state = if let Err(error) = candidate_result {
-            item.blocked_reasons
-                .push(format!("候选副本验证失败: {error:#}"));
+        let candidate_result = verify_copy_once(
+            database,
+            config,
+            item.candidate_delete.file_copy_id,
+            options.verify_full_hash,
+            &mut verification_cache,
+        );
+        item.candidate_metadata_state = if !candidate_result.verified {
+            item.blocked_reasons.push(format!(
+                "候选副本验证失败: {}",
+                candidate_result.failure_message()
+            ));
+            item.verification_failures.push(format!(
+                "候选副本 {}: {}",
+                item.candidate_delete.path,
+                candidate_result.failure_message()
+            ));
             "failed".to_owned()
         } else {
             "verified".to_owned()
         };
-        let mut keeper_failures = Vec::new();
-        for keeper in &item.keep_candidates {
-            let result = database
-                .file_record_by_id(keeper.file_copy_id)?
-                .context("保留副本记录不存在")
-                .and_then(|record| {
-                    verify_record(database, config, &record, options.verify_full_hash)
-                });
-            if let Err(error) = result {
-                keeper_failures.push(error.to_string());
-            }
+
+        // 每个独立 storage object 只验证一个代表路径；只有这些实际验证成功的代表才能
+        // 进入后续路径、存储对象、卷和物理设备安全计数。
+        let mut representatives = std::collections::BTreeMap::new();
+        for copy in &item.all_remaining_candidates {
+            representatives
+                .entry(storage_object_identity(copy))
+                .or_insert_with(|| copy.clone());
         }
-        item.keeper_metadata_state = if keeper_failures.is_empty() {
+        let mut representative_results = std::collections::HashMap::new();
+        for (storage_key, representative) in &representatives {
+            let result = verify_copy_once(
+                database,
+                config,
+                representative.file_copy_id,
+                options.verify_full_hash,
+                &mut verification_cache,
+            );
+            representative_results.insert(storage_key.clone(), result);
+        }
+        item.verified_remaining_copies = representatives
+            .iter()
+            .filter_map(|(storage_key, copy)| {
+                representative_results
+                    .get(storage_key)
+                    .filter(|result| result.verified)
+                    .map(|_| copy.clone())
+            })
+            .collect();
+        item.failed_remaining_copies = representatives
+            .iter()
+            .filter_map(|(storage_key, copy)| {
+                representative_results
+                    .get(storage_key)
+                    .filter(|result| !result.verified)
+                    .map(|result| {
+                        item.verification_failures.push(format!(
+                            "剩余副本 {}: {}",
+                            copy.path,
+                            result.failure_message()
+                        ));
+                        copy.clone()
+                    })
+            })
+            .collect();
+        for copy in &item.unknown_identity_copies {
+            item.physical_identity_warnings.push(format!(
+                "{} 的物理设备身份为 {}，不计入安全物理设备阈值。",
+                copy.path,
+                copy.physical_identity_state.as_str()
+            ));
+        }
+        for copy in item
+            .all_known_copies
+            .iter()
+            .filter(|copy| copy.physical_identity_state == PhysicalDeviceIdentityState::Conflict)
+        {
+            item.blocked_reasons.push(format!(
+                "{} 的整盘物理设备身份存在冲突，不能作为清理计划依据。",
+                copy.path
+            ));
+        }
+
+        let verified_storage_objects = item
+            .verified_remaining_copies
+            .iter()
+            .map(storage_object_identity)
+            .collect::<HashSet<_>>();
+        let verified_volumes = item
+            .verified_remaining_copies
+            .iter()
+            .map(|copy| copy.volume_id)
+            .collect::<HashSet<_>>();
+        let verified_physical_devices = item
+            .verified_remaining_copies
+            .iter()
+            .filter(|copy| copy.physical_identity_state == PhysicalDeviceIdentityState::Verified)
+            .filter_map(|copy| copy.physical_device_id)
+            .collect::<HashSet<_>>();
+        item.verified_remaining_path_copies = item.verified_remaining_copies.len();
+        item.verified_remaining_storage_objects = verified_storage_objects.len();
+        item.verified_remaining_logical_volumes = verified_volumes.len();
+        item.verified_remaining_physical_devices = verified_physical_devices.len();
+
+        let verified_keeper = item.keep_candidates.iter().any(|keeper| {
+            representative_results
+                .get(&storage_object_identity(keeper))
+                .is_some_and(|result| result.verified)
+        });
+        item.keeper_metadata_state = if verified_keeper {
             "verified".to_owned()
         } else {
             item.blocked_reasons
-                .push(format!("保留副本验证失败: {}", keeper_failures.join("；")));
+                .push("指定保留卷没有通过验证的独立存储对象。".to_owned());
             "failed".to_owned()
         };
+        if item.verified_remaining_storage_objects < min_remaining_copies {
+            item.blocked_reasons.push(format!(
+                "验证后仅剩 {} 个独立存储对象，少于要求的 {min_remaining_copies} 个。",
+                item.verified_remaining_storage_objects
+            ));
+        }
+        if item.verified_remaining_physical_devices < options.min_remaining_physical_devices {
+            item.blocked_reasons.push(format!(
+                "验证后仅剩 {} 个已验证物理设备，少于要求的 {} 个。",
+                item.verified_remaining_physical_devices, options.min_remaining_physical_devices
+            ));
+        }
         item.status = if item.blocked_reasons.is_empty() {
             "verified_candidate".to_owned()
+        } else if item.candidate_metadata_state == "failed"
+            && item
+                .verification_failures
+                .iter()
+                .any(|failure| failure_is_stale(failure))
+        {
+            "stale".to_owned()
         } else {
             "blocked".to_owned()
         };
     }
     plan.verification_mode = verification_mode.to_owned();
     plan.verified_at = Some(verified_at);
+    plan.completed_items = plan.items.len();
+    plan.blocked_items = plan
+        .items
+        .iter()
+        .filter(|item| item.status == "blocked" || item.status == "stale")
+        .count();
+    plan.verified_items = plan
+        .items
+        .iter()
+        .filter(|item| item.status == "verified_candidate")
+        .count();
     Ok(plan)
+}
+
+#[derive(Clone)]
+struct CopyVerificationResult {
+    verified: bool,
+    failure: Option<String>,
+}
+
+impl CopyVerificationResult {
+    fn failure_message(&self) -> &str {
+        self.failure.as_deref().unwrap_or("未知验证错误")
+    }
+}
+
+fn verify_copy_once(
+    database: &mut Database,
+    config: &Config,
+    file_copy_id: i64,
+    verify_full_hash: bool,
+    cache: &mut std::collections::HashMap<i64, CopyVerificationResult>,
+) -> CopyVerificationResult {
+    if let Some(result) = cache.get(&file_copy_id) {
+        return result.clone();
+    }
+    let result = (|| {
+        let record = database
+            .file_record_by_id(file_copy_id)?
+            .context("清理候选记录不存在")?;
+        verify_record(database, config, &record, verify_full_hash)
+    })();
+    let result = match result {
+        Ok(()) => CopyVerificationResult {
+            verified: true,
+            failure: None,
+        },
+        Err(error) => CopyVerificationResult {
+            verified: false,
+            failure: Some(format!("{error:#}")),
+        },
+    };
+    cache.insert(file_copy_id, result.clone());
+    result
+}
+
+fn failure_is_stale(failure: &str) -> bool {
+    ["文件元数据已改变", "完整哈希不匹配", "验证期间文件发生变化"]
+        .iter()
+        .any(|marker| failure.contains(marker))
 }
 
 pub fn write_cleanup_plan(path: &Path, plan: &CleanupPlan) -> Result<()> {

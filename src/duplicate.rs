@@ -377,6 +377,12 @@ pub fn verify_record(
     verify_full_hash: bool,
 ) -> Result<()> {
     let volume = database.volume_by_id(record.volume_id)?;
+    if record.status != "present" {
+        anyhow::bail!("文件当前索引状态不是 present: {}", record.status);
+    }
+    if !volume.is_online {
+        anyhow::bail!("文件所属卷当前不在线: {}", volume.mount_path.display());
+    }
     let path = record.absolute_path(&volume.mount_path);
     let actual = match file_metadata(&volume.mount_path, &path) {
         Ok(metadata) => metadata,

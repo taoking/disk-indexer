@@ -907,6 +907,13 @@ fn duplicate_reports_exclude_nonpresent_statuses_and_cleanup_verifies_files() {
             .iter()
             .all(|item| item.status == "verified_candidate")
     );
+    assert_eq!(verified_plan.verification_protocol_version, 1);
+    assert_eq!(verified_plan.verified_items, verified_plan.items.len());
+    assert!(verified_plan.items.iter().all(|item| {
+        item.verified_remaining_storage_objects >= 1
+            && !item.verified_remaining_copies.is_empty()
+            && item.failed_remaining_copies.is_empty()
+    }));
 
     fs::write(volume_b.join("keeper"), b"changed-ke").expect("change keeper without scan");
     let blocked_plan = create_cleanup_plan_with_verification(
@@ -927,6 +934,93 @@ fn duplicate_reports_exclude_nonpresent_statuses_and_cleanup_verifies_files() {
             .items
             .iter()
             .all(|item| item.status == "blocked")
+    );
+}
+
+#[test]
+fn strict_cleanup_counts_only_all_successfully_verified_remaining_storage_objects() {
+    let temp = tempdir().expect("temporary root");
+    let target_path = temp.path().join("target");
+    let keeper_path = temp.path().join("keeper");
+    let third_path = temp.path().join("third");
+    for path in [&target_path, &keeper_path, &third_path] {
+        fs::create_dir_all(path).expect("volume directory");
+        fs::write(path.join("copy"), b"same bytes").expect("duplicate copy");
+    }
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let target = registered(
+        register_volume_with_identity(
+            &mut database,
+            &target_path,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("strict-target", Some("strict-target"))),
+        )
+        .expect("target volume"),
+    );
+    let keeper = registered(
+        register_volume_with_identity(
+            &mut database,
+            &keeper_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("strict-keeper", Some("strict-keeper"))),
+        )
+        .expect("keeper volume"),
+    );
+    let third = registered(
+        register_volume_with_identity(
+            &mut database,
+            &third_path,
+            VolumeRole::OffsiteBackup,
+            MarkerPolicy::WriteIfPossible,
+            Some(test_volume_identity("strict-third", Some("strict-third"))),
+        )
+        .expect("third volume"),
+    );
+    for volume in [&target, &keeper, &third] {
+        scan(
+            &mut database,
+            &config,
+            volume,
+            &ScanOptions {
+                full_hash: true,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("full scan");
+    }
+    // 不重扫就破坏第三副本：数据库仍显示 present，严格验证必须拒绝将其计入阈值。
+    fs::write(third_path.join("copy"), b"broken-xxx").expect("corrupt third copy");
+    let plan = create_cleanup_plan_with_verification(
+        &mut database,
+        &config,
+        target.id,
+        keeper.id,
+        2,
+        CleanupVerificationOptions {
+            min_remaining_physical_devices: 1,
+            verify_metadata: true,
+            verify_full_hash: true,
+        },
+    )
+    .expect("strict cleanup plan");
+    let item = plan.items.first().expect("candidate item");
+    assert_eq!(item.status, "blocked");
+    assert_eq!(item.all_remaining_candidates.len(), 2);
+    assert_eq!(item.verified_remaining_storage_objects, 1);
+    assert_eq!(item.verified_remaining_physical_devices, 1);
+    assert_eq!(item.failed_remaining_copies.len(), 1);
+    assert!(
+        item.verification_failures
+            .iter()
+            .any(|failure| failure.contains("第三") || failure.contains("文件元数据已改变"))
+    );
+    assert!(
+        item.blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("验证后仅剩 1 个独立存储对象"))
     );
 }
 

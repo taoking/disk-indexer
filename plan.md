@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 12.2（整盘级物理设备身份）已完成；下一步是 Phase 12.3（严格清理验证重新计数）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
+Phase 12.3（严格清理验证重新计数）已完成；下一步是 Phase 12.4（统一 JSONL 长任务进度）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
 
 ## 已完成
 
@@ -26,10 +26,10 @@ Phase 12.2（整盘级物理设备身份）已完成；下一步是 Phase 12.3�
 - Phase 11：新增 macOS App GitHub Actions job（Swift 测试、Bundle 构建与内置 Rust binary 检查）、完整原生 App/迁移/身份安全文档和验收步骤；`scripts/build-macos-app.sh` 已实际生成 `DiskIndexer.app`，主程序与内置 CLI 均为 arm64 Mach-O，后者可执行且版本为 0.1.0。已用 `open` 启动 App 并确认进程仍运行；该进程无 TCP 监听，CLI/依赖树也不含旧 Web UI 组件。为兼容 GitHub `macos-14` 的 Xcode 15.4，项目使用 Swift 5 语言模式（仍使用 Swift Concurrency API），而不是要求仅本机已有的 Swift 6。
 - Phase 12.1：已核验 `main` 与 `origin/main` 同步；`cargo fmt --check`、严格 Clippy、全部 Rust 测试（7 单元、12 集成）、Swift 测试（3）和 `scripts/build-macos-app.sh` 均通过。隔离数据库 schema 为 v4；最新 GitHub Actions `30438122820`（`c1e9bd4`）的 `quality` 与 `macos-app` job 均成功。构建仅有 AppIntents 未使用的 Xcode 警告，不影响产物。
 - Phase 12.2：新增 `0005_physical_device_identity_v2`。物理设备现保存整盘标识、整盘 Media UUID、硬件序列号、身份状态/来源和最近验证时间；macOS 注册会从卷的 `ParentWholeDisk` 再查询整盘 `diskutil -plist`，不再将 `disk4s2` 一类 `DeviceIdentifier` 当作序列号。只有硬件序列号或整盘 Media UUID 的 `verified` 身份可进入物理设备安全计数；整盘标识仅为 `inferred`，旧数据和无法确认的设备为 `unknown`，矛盾证据为 `conflict`。重复报告/CSV 显式输出 verified 与 unknown/unverified 数量，清理阈值只计 verified。旧 schema 的卷/分区 UUID 回填不再自动升级为 verified。Rust 质量门（7 单元、14 集成）与 Swift 3 项测试均通过。
+- Phase 12.3：严格清理计划会先刷新卷在线状态，并对候选删除副本和每个剩余独立 storage object 的代表路径执行元数据/可选完整 BLAKE3 验证；本任务缓存同一 `file_copy_id`，不会重复完整哈希。所有阈值只基于验证成功的代表副本重新计算，且物理设备仍只计 `verified` 整盘身份。计划 JSON 新增验证协议版本、完成/阻止/验证计数、取消预留字段、剩余候选/成功/失败副本、验证后各类计数、失败原因和物理身份警告。必要副本的失败会阻止计划；候选自身的 stale 则标明 `stale`。新增破坏未重扫的第三副本回归覆盖；Rust 质量门（7 单元、15 集成）与 Swift 3 项测试均通过。
 
 ## 待完成
 
-- Phase 12.3：严格清理验证重新计数。
 - Phase 12.4：统一 JSONL 长任务进度。
 - Phase 12.5：任务守卫、取消与异常恢复。
 - Phase 12.6：Swift 清理任务上下文绑定。
@@ -59,7 +59,7 @@ Phase 12.2（整盘级物理设备身份）已完成；下一步是 Phase 12.3�
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 - Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 - Phase 11：当前 Bundle 为未签名 Debug 构建，尚未做 Developer ID 签名、公证或 dmg/pkg 发布；Universal 2 只保留了构建扩展说明，尚未实际合并 x86_64 二进制。GitHub Actions 会在推送本提交后验证 macOS 环境。
-- Phase 12.2：schema 已升至 v5，旧数据库中的物理设备会保守降级为 unknown，须在实际挂载并重新注册后取得整盘级身份；迁移前备份、严格全量清理验证和任务恢复仍将在后续阶段完成。
+- Phase 12.3：严格清理验证已覆盖参与安全计数的存储对象代表，但尚未接入统一取消标志、JSONL 实时进度或原子临时输出；这些由 Phase 12.4–12.5 收口。
 
 ## 发布记录
 
