@@ -11,13 +11,26 @@ struct OverviewView: View {
                 Text("所有操作在本机通过内置 Rust CLI 完成；此应用不会启动浏览器、HTTP 服务或监听端口。")
                     .foregroundStyle(.secondary)
                 HStack(spacing: 16) {
-                    MetricCard(title: "已注册硬盘", value: "\(appState.volumes.count)", icon: "externaldrive")
+                    MetricCard(title: "已注册硬盘", value: "\(appState.dashboardStats?.registeredVolumes ?? appState.volumes.count)", icon: "externaldrive")
                     MetricCard(
                         title: "在线硬盘",
-                        value: "\(appState.volumes.filter(\.isOnline).count)",
+                        value: "\(appState.dashboardStats?.onlineVolumes ?? appState.volumes.filter(\.isOnline).count)",
                         icon: "checkmark.circle"
                     )
-                    MetricCard(title: "最近任务", value: "\(appState.tasks.count)", icon: "clock")
+                    MetricCard(title: "已索引文件", value: "\(appState.dashboardStats?.indexedFiles ?? 0)", icon: "doc")
+                    MetricCard(title: "可信重复组", value: "\(appState.dashboardStats?.trustedDuplicateGroups ?? 0)", icon: "square.on.square")
+                }
+                if let stats = appState.dashboardStats {
+                    GroupBox("索引统计") {
+                        Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 8) {
+                            GridRow { Text("数据库 schema"); Text("v\(stats.schemaVersion)") }
+                            GridRow { Text("离线卷"); Text("\(stats.offlineVolumes)") }
+                            GridRow { Text("完整哈希文件"); Text("\(stats.fullHashedFiles)") }
+                            GridRow { Text("可验证在线副本"); Text("\(stats.verifiableOnlineCopies)") }
+                            GridRow { Text("理论可释放空间"); Text(ByteCountFormatter.string(fromByteCount: stats.theoreticalReclaimableBytes, countStyle: .file)) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 GroupBox("最近任务") {
                     if appState.tasks.isEmpty {
@@ -38,18 +51,11 @@ struct OverviewView: View {
                     if appState.isLoading { ProgressView() }
                     Text(appState.statusMessage).foregroundStyle(.secondary)
                 }
+                Text("理论可释放空间不是删除建议；内容重复不等于副本多余。")
+                    .foregroundStyle(.orange)
             }
             .padding(24)
         }
-        .alert("本地 CLI 错误", isPresented: errorBinding) {
-            Button("好", role: .cancel) { appState.errorMessage = nil }
-        } message: {
-            Text(appState.errorMessage ?? "未知错误")
-        }
-    }
-
-    private var errorBinding: Binding<Bool> {
-        Binding(get: { appState.errorMessage != nil }, set: { if !$0 { appState.errorMessage = nil } })
     }
 }
 

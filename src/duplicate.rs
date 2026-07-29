@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use serde::Serialize;
 
 use crate::config::Config;
 use crate::db::Database;
@@ -31,6 +32,13 @@ impl Default for DuplicateFilter {
             volume_id: None,
         }
     }
+}
+
+/// 供原生应用逐页读取的重复组游标结果。游标按内容记录 ID 前进，避免把完整报告加载到 Swift 内存。
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateGroupsPage {
+    pub groups: Vec<DuplicateGroup>,
+    pub next_after_content_id: Option<i64>,
 }
 
 pub fn duplicate_groups(
@@ -108,6 +116,105 @@ pub fn duplicate_groups(
             .then_with(|| left.full_hash.cmp(&right.full_hash))
     });
     Ok(groups)
+}
+
+/// 以稳定内容 ID 游标读取重复组。此接口刻意不做全局排序，以保证读取成本与页面大小成正比。
+pub fn duplicate_groups_page(
+    database: &Database,
+    filter: DuplicateFilter,
+    after_content_id: i64,
+    limit: usize,
+) -> Result<DuplicateGroupsPage> {
+    if limit == 0 {
+        bail!("重复组分页大小必须大于 0");
+    }
+    let mut groups = Vec::with_capacity(limit);
+    let mut cursor = after_content_id;
+    const CONTENT_BATCH_SIZE: usize = 200;
+    loop {
+        let content_page =
+            database.duplicate_content_ids_page(cursor, 2, filter.min_size, CONTENT_BATCH_SIZE)?;
+        if content_page.is_empty() {
+            return Ok(DuplicateGroupsPage {
+                groups,
+                next_after_content_id: None,
+            });
+        }
+        let page_was_full = content_page.len() == CONTENT_BATCH_SIZE;
+        for (content_id, full_hash, file_size) in content_page {
+            cursor = content_id;
+            let records = database.records_by_content(content_id)?;
+            let copies = records
+                .iter()
+                .filter(|record| include_record(record, filter))
+                .map(copy_view)
+                .collect::<Vec<_>>();
+            if copies.len() < filter.min_copies {
+                continue;
+            }
+            groups.push(build_duplicate_group(full_hash, file_size, copies));
+            if groups.len() == limit {
+                return Ok(DuplicateGroupsPage {
+                    groups,
+                    next_after_content_id: Some(cursor),
+                });
+            }
+        }
+        if !page_was_full {
+            return Ok(DuplicateGroupsPage {
+                groups,
+                next_after_content_id: None,
+            });
+        }
+    }
+}
+
+fn build_duplicate_group(
+    full_hash: String,
+    file_size: u64,
+    copies: Vec<CopyView>,
+) -> DuplicateGroup {
+    let online_storage_objects = copies
+        .iter()
+        .filter(|copy| copy.is_online && copy.status == "present")
+        .map(storage_object_identity)
+        .collect::<HashSet<_>>();
+    let storage_objects = copies
+        .iter()
+        .map(storage_object_identity)
+        .collect::<HashSet<_>>();
+    let logical_volumes = copies
+        .iter()
+        .map(|copy| copy.volume_id)
+        .collect::<HashSet<_>>();
+    let physical_devices = copies
+        .iter()
+        .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
+        .collect::<HashSet<_>>();
+    let offline_copies = copies
+        .iter()
+        .filter(|copy| copy.status == "offline_unverified")
+        .count();
+    let missing_copies = copies
+        .iter()
+        .filter(|copy| copy.status == "missing")
+        .count();
+    DuplicateGroup {
+        full_hash,
+        file_size,
+        known_copies: copies.len(),
+        online_copies: online_storage_objects.len(),
+        offline_copies,
+        missing_copies,
+        path_count: copies.len(),
+        storage_object_count: storage_objects.len(),
+        logical_volume_count: logical_volumes.len(),
+        physical_device_count: physical_devices.len(),
+        theoretical_reclaimable_bytes: file_size.saturating_mul(
+            u64::try_from(online_storage_objects.len().saturating_sub(1)).unwrap_or(u64::MAX),
+        ),
+        copies,
+    }
 }
 
 pub fn lookup(

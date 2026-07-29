@@ -9,7 +9,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::duplicate::{DuplicateFilter, duplicate_groups, lookup, verify_record};
+use crate::duplicate::{
+    DuplicateFilter, duplicate_groups, duplicate_groups_page, lookup, verify_record,
+};
 use crate::model::VolumeRole;
 use crate::protocol::JsonlTask;
 use crate::report::{
@@ -60,6 +62,8 @@ enum Command {
     Verify(VerifyArgs),
     /// 查看可供原生 App 恢复展示的任务历史
     Tasks(TasksArgs),
+    /// 输出原生 App 概览所需的只读统计
+    Stats(StatsArgs),
     /// 生成只供人工审核的清理候选计划，不会删除文件
     Cleanup {
         #[command(subcommand)]
@@ -200,6 +204,15 @@ struct DuplicatesArgs {
     json: bool,
     #[arg(long)]
     csv: Option<PathBuf>,
+    /// 使用内容 ID 游标返回一页重复组；供原生 App 分段加载。
+    #[arg(long)]
+    page: bool,
+    /// 上一页返回的内容 ID 游标，仅与 --page 一起使用。
+    #[arg(long, default_value_t = 0)]
+    after_content_id: i64,
+    /// --page 的最多重复组数量。
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
 }
 
 #[derive(Debug, Args)]
@@ -220,6 +233,12 @@ struct TasksArgs {
     after_id: i64,
     #[arg(long, default_value_t = 100)]
     limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct StatsArgs {
     #[arg(long)]
     json: bool,
 }
@@ -279,16 +298,26 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Duplicates(args) => {
             database.refresh_volume_online_states()?;
-            let groups = duplicate_groups(
-                &database,
-                DuplicateFilter {
-                    min_size: args.min_size,
-                    min_copies: args.min_copies,
-                    online_only: args.online_only,
-                    include_missing: args.include_missing,
-                    volume_id: args.volume,
-                },
-            )?;
+            let filter = DuplicateFilter {
+                min_size: args.min_size,
+                min_copies: args.min_copies,
+                online_only: args.online_only,
+                include_missing: args.include_missing,
+                volume_id: args.volume,
+            };
+            if args.page {
+                if args.csv.is_some() {
+                    bail!("--page 不能与 --csv 一起使用，以免写出不完整报告");
+                }
+                if !args.json {
+                    bail!("--page 仅支持 --json 输出");
+                }
+                let page =
+                    duplicate_groups_page(&database, filter, args.after_content_id, args.limit)?;
+                print_json(&page)?;
+                return Ok(());
+            }
+            let groups = duplicate_groups(&database, filter)?;
             if let Some(path) = args.csv {
                 write_csv(&path, &groups)?;
                 eprintln!("CSV 报告已写入: {}", path.display());
@@ -311,6 +340,14 @@ pub fn run(cli: Cli) -> Result<()> {
                         task["id"], task["operation"], task["status"], task["started_at"]
                     );
                 }
+            }
+        }
+        Command::Stats(args) => {
+            let stats = database.dashboard_stats()?;
+            if args.json {
+                print_json(&stats)?;
+            } else {
+                println!("{stats}");
             }
         }
         Command::Cleanup { command } => match command {

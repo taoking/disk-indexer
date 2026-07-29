@@ -15,6 +15,8 @@
 		A10000000000000000000007 /* VolumesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* VolumesView.swift */; };
 		A10000000000000000000008 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* SettingsView.swift */; };
 		A10000000000000000000009 /* DiskIndexerAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* DiskIndexerAppTests.swift */; };
+		A10000000000000000000010 /* TaskProcessController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* TaskProcessController.swift */; };
+		A10000000000000000000011 /* TaskViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* TaskViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -39,6 +41,8 @@
 		A20000000000000000000009 /* DiskIndexerAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskIndexerAppTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000010 /* DiskIndexer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiskIndexer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000011 /* DiskIndexerAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiskIndexerAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000012 /* TaskProcessController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskProcessController.swift; sourceTree = "<group>"; };
+		A20000000000000000000013 /* TaskViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -59,7 +63,7 @@
 		A70000000000000000000002 /* DiskIndexerApp */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000001 /* DiskIndexerApp.swift */,
+				A70000000000000000000009 /* App */,
 				A70000000000000000000003 /* Models */,
 				A70000000000000000000004 /* Services */,
 				A70000000000000000000005 /* ViewModels */,
@@ -68,10 +72,11 @@
 			path = DiskIndexerApp;
 			sourceTree = "<group>";
 		};
+		A70000000000000000000009 /* App */ = {isa = PBXGroup; children = (A20000000000000000000001 /* DiskIndexerApp.swift */,); path = App; sourceTree = "<group>"; };
 		A70000000000000000000003 /* Models */ = {isa = PBXGroup; children = (A20000000000000000000002 /* DiskIndexerModels.swift */,); path = Models; sourceTree = "<group>"; };
-		A70000000000000000000004 /* Services */ = {isa = PBXGroup; children = (A20000000000000000000003 /* RustCommandRunner.swift */,); path = Services; sourceTree = "<group>"; };
+		A70000000000000000000004 /* Services */ = {isa = PBXGroup; children = (A20000000000000000000003 /* RustCommandRunner.swift */, A20000000000000000000012 /* TaskProcessController.swift */,); path = Services; sourceTree = "<group>"; };
 		A70000000000000000000005 /* ViewModels */ = {isa = PBXGroup; children = (A20000000000000000000004 /* AppState.swift */,); path = ViewModels; sourceTree = "<group>"; };
-		A70000000000000000000006 /* Views */ = {isa = PBXGroup; children = (A20000000000000000000005 /* RootView.swift */, A20000000000000000000006 /* OverviewView.swift */, A20000000000000000000007 /* VolumesView.swift */, A20000000000000000000008 /* SettingsView.swift */,); path = Views; sourceTree = "<group>"; };
+		A70000000000000000000006 /* Views */ = {isa = PBXGroup; children = (A20000000000000000000005 /* RootView.swift */, A20000000000000000000006 /* OverviewView.swift */, A20000000000000000000007 /* VolumesView.swift */, A20000000000000000000008 /* SettingsView.swift */, A20000000000000000000013 /* TaskViews.swift */,); path = Views; sourceTree = "<group>"; };
 		A70000000000000000000007 /* DiskIndexerAppTests */ = {isa = PBXGroup; children = (A20000000000000000000009 /* DiskIndexerAppTests.swift */,); path = DiskIndexerApp/Tests; sourceTree = "<group>"; };
 		A70000000000000000000008 /* Products */ = {isa = PBXGroup; children = (A20000000000000000000010 /* DiskIndexer.app */, A20000000000000000000011 /* DiskIndexerAppTests.xctest */,); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -119,7 +124,7 @@
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A90000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* DiskIndexerApp.swift in Sources */, A10000000000000000000002 /* DiskIndexerModels.swift in Sources */, A10000000000000000000003 /* RustCommandRunner.swift in Sources */, A10000000000000000000004 /* AppState.swift in Sources */, A10000000000000000000005 /* RootView.swift in Sources */, A10000000000000000000006 /* OverviewView.swift in Sources */, A10000000000000000000007 /* VolumesView.swift in Sources */, A10000000000000000000008 /* SettingsView.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A90000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* DiskIndexerApp.swift in Sources */, A10000000000000000000002 /* DiskIndexerModels.swift in Sources */, A10000000000000000000003 /* RustCommandRunner.swift in Sources */, A10000000000000000000010 /* TaskProcessController.swift in Sources */, A10000000000000000000004 /* AppState.swift in Sources */, A10000000000000000000005 /* RootView.swift in Sources */, A10000000000000000000006 /* OverviewView.swift in Sources */, A10000000000000000000007 /* VolumesView.swift in Sources */, A10000000000000000000008 /* SettingsView.swift in Sources */, A10000000000000000000011 /* TaskViews.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 		A90000000000000000000002 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* DiskIndexerAppTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

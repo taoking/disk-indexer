@@ -2,7 +2,7 @@ use std::fs;
 
 use disk_indexer::config::Config;
 use disk_indexer::db::Database;
-use disk_indexer::duplicate::{DuplicateFilter, duplicate_groups, lookup};
+use disk_indexer::duplicate::{DuplicateFilter, duplicate_groups, duplicate_groups_page, lookup};
 use disk_indexer::model::{Volume, VolumeRole};
 use disk_indexer::report::{
     CleanupVerificationOptions, create_cleanup_plan, create_cleanup_plan_with_verification,
@@ -106,6 +106,22 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
     assert_eq!(groups[0].online_copies, 3);
     assert_eq!(groups[0].file_size, 10);
     assert_eq!(groups[0].theoretical_reclaimable_bytes, 20);
+    let first_page = duplicate_groups_page(&database, DuplicateFilter::default(), 0, 1)
+        .expect("first duplicate page");
+    assert_eq!(first_page.groups.len(), 1);
+    let empty_page = duplicate_groups_page(
+        &database,
+        DuplicateFilter::default(),
+        first_page.next_after_content_id.expect("next cursor"),
+        1,
+    )
+    .expect("second duplicate page");
+    assert!(empty_page.groups.is_empty());
+    assert!(empty_page.next_after_content_id.is_none());
+    let stats = database.dashboard_stats().expect("dashboard stats");
+    assert_eq!(stats["schema_version"], 4);
+    assert_eq!(stats["trusted_duplicate_groups"], 1);
+    assert_eq!(stats["theoretical_reclaimable_bytes"], 20);
     let json = serde_json::to_value(duplicate_report(&database, &groups)).expect("json report");
     assert_eq!(json["schema_version"], 1);
     let csv_path = temp.path().join("duplicates.csv");

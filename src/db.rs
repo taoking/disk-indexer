@@ -305,6 +305,60 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// 原生 App 概览所需的只读汇总；不返回文件路径，也不改变任何索引状态。
+    pub fn dashboard_stats(&self) -> Result<serde_json::Value> {
+        let schema_version = self.schema_version()?;
+        let (registered_volumes, online_volumes, offline_volumes): (i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN is_online = 0 THEN 1 ELSE 0 END), 0)
+                 FROM volumes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let indexed_files: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM file_copies WHERE status != 'deleted'",
+            [],
+            |row| row.get(0),
+        )?;
+        let full_hashed_files: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM file_copies WHERE full_hash IS NOT NULL AND status = 'present'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (trusted_duplicate_groups, verifiable_online_copies, theoretical_reclaimable_bytes):
+            (i64, i64, i64) = self.connection.query_row(
+                "WITH online_groups AS (
+                    SELECT c.id, c.file_size,
+                           COUNT(DISTINCT COALESCE(f.storage_object_key, printf('path:%d', f.id))) AS storage_objects
+                    FROM contents c
+                    JOIN file_copies f ON f.content_id = c.id
+                    JOIN volumes v ON v.id = f.volume_id
+                    WHERE c.full_hash IS NOT NULL AND f.status = 'present' AND v.is_online = 1
+                    GROUP BY c.id
+                    HAVING storage_objects >= 2
+                 )
+                 SELECT COUNT(*),
+                        COALESCE(SUM(storage_objects), 0),
+                        COALESCE(SUM(file_size * (storage_objects - 1)), 0)
+                 FROM online_groups",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        Ok(json!({
+            "schema_version": schema_version,
+            "registered_volumes": registered_volumes,
+            "online_volumes": online_volumes,
+            "offline_volumes": offline_volumes,
+            "indexed_files": indexed_files,
+            "full_hashed_files": full_hashed_files,
+            "trusted_duplicate_groups": trusted_duplicate_groups,
+            "verifiable_online_copies": verifiable_online_copies,
+            "theoretical_reclaimable_bytes": theoretical_reclaimable_bytes,
+        }))
+    }
+
     pub fn upsert_volume(&mut self, input: VolumeUpsert<'_>) -> Result<Volume> {
         let VolumeUpsert {
             volume_uid,

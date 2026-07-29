@@ -38,6 +38,36 @@ struct VolumesView: View {
                 TableColumn("角色") { Text($0.role) }
                 TableColumn("状态") { Text($0.isOnline ? "在线" : "离线") }
                 TableColumn("身份") { Text($0.identityState) }
+                TableColumn("System UUID") { Text($0.systemVolumeUUID ?? "—").lineLimit(1) }
+                TableColumn("物理设备") { Text($0.physicalDeviceID.map(String.init) ?? "目录索引") }
+                TableColumn("操作") { volume in
+                    HStack {
+                        Button("扫描") { appState.startScan(volume: volume, mode: .incremental) }
+                            .disabled(!volume.isOnline || appState.isTaskRunning)
+                        Button("在 Finder 中显示") {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: volume.mountPath))
+                        }
+                    }
+                }
+            }
+            if !appState.conflicts.isEmpty {
+                GroupBox("待人工确认的身份冲突") {
+                    ForEach(appState.conflicts) { conflict in
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                            Text("#\(conflict.id) · \(conflict.candidateMountPath)").lineLimit(1)
+                            Spacer()
+                            Button("明确保留为新卷") {
+                                Task { await appState.resolveConflictAsNewVolume(conflict, role: "unknown") }
+                            }
+                            .disabled(appState.isLoading)
+                        }
+                    }
+                    Text("此操作不会合并或覆盖原卷，且会写入本地审计事件。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(24)

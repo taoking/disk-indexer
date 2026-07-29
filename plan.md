@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 10.2（SwiftUI App 基础）已完成；下一步是 Phase 10.3（原生业务页面与任务控制）。本轮目标是以 macOS 原生 App 完全替代浏览器 UI。
+Phase 10.3（原生业务页面与任务控制）已完成；下一步是 Phase 11（稳定性、CI、App Bundle 与最终验收）。本轮目标是以 macOS 原生 App 完全替代浏览器 UI。
 
 ## 已完成
 
@@ -22,10 +22,10 @@ Phase 10.2（SwiftUI App 基础）已完成；下一步是 Phase 10.3（原生�
 - Phase 9.4：新增 `0004_task_protocol_and_paging` 和 `task_runs`。哈希补齐、卷验证、候选哈希和重复内容查询改用 `id > after_id` keyset 分页，默认查询页 1000、写入批 500；新增 `--jsonl-progress`、任务历史和 SIGINT 安全停止。JSONL stdout 只写机器事件，stderr 保留诊断。自动化覆盖 10 万条模拟文件的分页无遗漏和 JSONL 纯事件输出。
 - Phase 10.1：完全删除 `disk-indexer ui`、`src/ui.rs`、静态页面、Axum/Tokio/WebBrowser/Tower 依赖与所有端口文档；CLI 集成测试断言 `ui` 子命令不可用，依赖树不再包含这些组件。
 - Phase 10.2：新增 Apple Silicon 优先、macOS 14+ 的 SwiftUI Xcode 项目和独立单元测试；实现概览、硬盘注册、设置页，以及通过 `Bundle.main` 定位内置 Rust CLI 的 `Process.arguments` 调用边界。构建脚本会将 release `disk-indexer` 复制到 `DiskIndexer.app/Contents/Resources/`；同步读取 stdout/stderr 防止大输出管道阻塞。未引入 PATH、shell、HTTP、浏览器或端口。
+- Phase 10.3：新增扫描任务、重复文件、文件查询、清理计划和日志原生页；长任务由 `TaskProcessController` 使用 JSONL 实时展示，stdout/stderr 分离，取消先 SIGINT、超时才 terminate，关闭窗口时要求选择安全取消或保留窗口。重复组新增 Rust 内容 ID 游标 API（每页 50）而非一次传给 Swift；概览新增只读统计接口。文件查询明确标示 `cache_stale`，清理页只能生成/导出 JSON 计划，绝无删除操作。Swift 单测覆盖 JSONL 分段解码和取消状态。
 
 ## 待完成
 
-- Phase 10.3：扫描任务、重复文件、查询、清理计划和日志页。
 - Phase 11：原生 App 测试、CI、Release App Bundle 与最终验收。
 
 ## 技术决策
@@ -46,6 +46,7 @@ Phase 10.2（SwiftUI App 基础）已完成；下一步是 Phase 10.3（原生�
 - Phase 9.1 基线：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 已于 2026-07-29 通过（9 单元测试、3 集成测试）；当前尚无 Swift/Xcode 项目，因此 Swift build/test 门在本阶段不适用。Xcode 26.6 和 Swift 6.3.3 已验证可用。
 - Phase 9.2 的 CLI 冲突返回是安全状态而不是异常；调用方必须检查 `volume` 是否为 null/缺失并引导用户先审核冲突。
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
+- Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 
 ## 发布记录
 

@@ -3,16 +3,18 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var pendingDatabasePath = ""
 
     var body: some View {
         Form {
             Section("数据库") {
-                TextField("SQLite 数据库路径", text: $appState.databasePath)
+                TextField("SQLite 数据库路径", text: $pendingDatabasePath)
                 HStack {
                     Button("选择位置…") { chooseDatabaseLocation() }
-                    Button("验证并刷新") { Task { await appState.refresh() } }
+                    Button("验证并切换") { Task { await appState.applyDatabasePath(pendingDatabasePath) } }
+                        .disabled(appState.isTaskRunning || pendingDatabasePath == appState.databasePath)
                 }
-                Text("每条 Rust 命令都会显式传入此路径；应用不使用 PATH，也不直接写入 SQLite 业务表。")
+                Text("切换时会先阻止运行任务，并只接受已存在、可通过 Rust CLI 打开的 SQLite 文件，避免静默创建错误数据库。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -24,13 +26,16 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding(24)
         .navigationTitle("设置")
+        .onAppear { pendingDatabasePath = appState.databasePath }
     }
 
     private func chooseDatabaseLocation() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "index.db"
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
-            appState.databasePath = url.path
+            pendingDatabasePath = url.path
         }
     }
 }
