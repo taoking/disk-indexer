@@ -102,9 +102,19 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 
 `--json` 适用于脚本或未来 GUI；进度和警告不混入 JSON 标准输出。`duplicates` 的 CSV 将每个副本展开为一行。`lookup --full-hash` 会对路径当前的文件执行精确完整哈希；未传该参数时，抽样匹配只能作为候选提示。
 
+如果 `lookup` 返回 `cache_stale`、`metadata_matches_index: false` 或 `requires_rehash: true`，文件的大小、修改时间、inode 或设备号已与索引不符。工具不会复用旧完整哈希，也不会显示精确命中；使用 `lookup <path> --full-hash` 重新计算当前文件。
+
 ## 5. 清理计划如何阅读
 
-`cleanup plan` 的 `candidate_only` 不是可直接执行的删除指令。它仅代表：目标副本当前在线、指定保留卷有在线可信副本，且移除目标后在线副本数量仍满足阈值。`blocked` 会列出原因，常见情况是保留卷离线、完整哈希缺失或在线副本数量不足。
+`cleanup plan` 默认产生的 `candidate_unverified` 不是可直接执行的删除指令。它只代表目标副本当前在线、指定保留卷有在线可信副本，且移除目标路径后在线独立存储对象数量满足阈值。需要在生成时重新校验文件，可使用：
+
+```bash
+disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
+  --min-remaining-copies 2 --min-remaining-physical-devices 2 \
+  --verify-metadata --verify-full-hash --output cleanup-plan.json
+```
+
+严格验证全部通过才会得到 `verified_candidate`；任一候选或保留副本失效、剩余独立存储对象不足、物理设备不足或目标是硬链接路径时均为 `blocked`。工具不会执行删除。
 
 每次实际人工清理前，应重新扫描相关卷，并对计划中的文件执行 `verify --file-copy <id> --full-hash`。同一物理硬盘的不同分区不等于独立备份；内容相同不等于副本多余。
 

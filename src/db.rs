@@ -23,6 +23,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_volume_identity_safety",
         include_str!("../migrations/0002_volume_identity_safety.sql"),
     ),
+    (
+        "0003_hash_report_safety",
+        include_str!("../migrations/0003_hash_report_safety.sql"),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -936,7 +940,7 @@ impl Database {
         let mut statement = self.connection.prepare(
             "SELECT c.id, c.full_hash, c.file_size
              FROM contents c JOIN file_copies f ON f.content_id = c.id
-             WHERE c.full_hash IS NOT NULL AND c.file_size >= ?1
+             WHERE c.full_hash IS NOT NULL AND c.file_size >= ?1 AND f.status = 'present'
              GROUP BY c.id HAVING COUNT(*) >= ?2
              ORDER BY c.file_size DESC, COUNT(*) DESC, c.full_hash",
         )?;
@@ -996,12 +1000,14 @@ fn observe_file_in_transaction(
 ) -> Result<MetadataOutcome> {
     let timestamp = now();
     let relative_bytes = path_bytes(&metadata.relative_path);
+    let storage_object_key = storage_object_key(transaction, volume_id, metadata)?;
+    let link_group_id = storage_object_key.clone();
     let outcome = if let Some(record) = existing {
         if metadata_matches(&record, metadata) {
             transaction.execute(
                 "UPDATE file_copies SET status = 'present', last_error = NULL, last_seen_at = ?1,
-                        updated_at = ?1 WHERE id = ?2",
-                params![timestamp, record.id],
+                        storage_object_key = ?2, link_group_id = ?3, updated_at = ?1 WHERE id = ?4",
+                params![timestamp, storage_object_key, link_group_id, record.id],
             )?;
             if record.status != "present" {
                 insert_event(
@@ -1026,8 +1032,8 @@ fn observe_file_in_transaction(
                     "UPDATE file_copies SET filename = ?1, filename_display = ?2, file_size = ?3,
                         modified_at_ns = ?4, created_at_ns = ?5, inode = ?6, device_id = ?7,
                         content_id = NULL, sample_hash = NULL, sample_algorithm = NULL, full_hash = NULL,
-                        hash_state = 'none', status = 'present', last_error = NULL, last_seen_at = ?8,
-                        updated_at = ?8 WHERE id = ?9",
+                        hash_state = 'none', status = 'present', last_error = NULL, storage_object_key = ?8,
+                        link_group_id = ?9, last_seen_at = ?10, updated_at = ?10 WHERE id = ?11",
                     params![
                         path_bytes(&metadata.filename),
                         display_path(&metadata.filename),
@@ -1036,6 +1042,8 @@ fn observe_file_in_transaction(
                         metadata.created_at_ns,
                         metadata.inode,
                         metadata.device_id,
+                        storage_object_key,
+                        link_group_id,
                         timestamp,
                         record.id
                     ],
@@ -1054,9 +1062,9 @@ fn observe_file_in_transaction(
         transaction.execute(
             "INSERT INTO file_copies (
                     volume_id, relative_path, relative_path_display, filename, filename_display,
-                    file_size, modified_at_ns, created_at_ns, inode, device_id, status,
-                    first_seen_at, last_seen_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'present', ?11, ?11, ?11, ?11)",
+                    file_size, modified_at_ns, created_at_ns, inode, device_id, storage_object_key, link_group_id,
+                    status, first_seen_at, last_seen_at, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'present', ?13, ?13, ?13, ?13)",
             params![
                 volume_id,
                 relative_bytes,
@@ -1068,6 +1076,8 @@ fn observe_file_in_transaction(
                 metadata.created_at_ns,
                 metadata.inode,
                 metadata.device_id,
+                storage_object_key,
+                link_group_id,
                 timestamp
             ],
         )?;
@@ -1090,6 +1100,25 @@ fn metadata_matches(record: &FileRecord, metadata: &FileMetadata) -> bool {
         && record.modified_at_ns == metadata.modified_at_ns
         && record.inode == metadata.inode
         && record.device_id == metadata.device_id
+}
+
+fn storage_object_key(
+    transaction: &Transaction<'_>,
+    volume_id: i64,
+    metadata: &FileMetadata,
+) -> Result<Option<String>> {
+    let Some(physical_device_id) = transaction.query_row(
+        "SELECT physical_device_id FROM volumes WHERE id = ?1",
+        [volume_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )?
+    else {
+        return Ok(None);
+    };
+    let (Some(device_id), Some(inode)) = (metadata.device_id, metadata.inode) else {
+        return Ok(None);
+    };
+    Ok(Some(format!("v1:{physical_device_id}:{device_id}:{inode}")))
 }
 
 fn insert_event(
@@ -1178,10 +1207,10 @@ fn row_to_volume_conflict(row: &Row<'_>) -> rusqlite::Result<VolumeIdentityConfl
 
 fn file_record_select(where_clause: &str) -> String {
     format!(
-        "SELECT f.id, f.volume_id, v.volume_uid, v.volume_name, v.role, v.is_online,
+        "SELECT f.id, f.volume_id, v.volume_uid, v.volume_name, v.role, v.is_online, v.physical_device_id,
                 f.relative_path, f.file_size, f.modified_at_ns, f.created_at_ns, f.inode, f.device_id,
-                f.content_id, f.sample_hash, f.full_hash, f.hash_state, f.status, f.last_error,
-                f.first_seen_at, f.last_seen_at, f.last_verified_at
+                f.storage_object_key, f.link_group_id, f.content_id, f.sample_hash, f.full_hash,
+                f.hash_state, f.status, f.last_error, f.first_seen_at, f.last_seen_at, f.last_verified_at
          FROM file_copies f JOIN volumes v ON v.id = f.volume_id {where_clause}"
     )
 }
@@ -1195,21 +1224,24 @@ fn row_to_file_record(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
         volume_name: row.get(3)?,
         volume_role: role.parse().unwrap_or(VolumeRole::Unknown),
         volume_online: row.get::<_, i64>(5)? != 0,
-        relative_path: path_from_bytes(&row.get::<_, Vec<u8>>(6)?),
-        file_size: row.get(7)?,
-        modified_at_ns: row.get(8)?,
-        created_at_ns: row.get(9)?,
-        inode: row.get(10)?,
-        device_id: row.get(11)?,
-        content_id: row.get(12)?,
-        sample_hash: row.get(13)?,
-        full_hash: row.get(14)?,
-        hash_state: row.get(15)?,
-        status: row.get(16)?,
-        last_error: row.get(17)?,
-        first_seen_at: row.get(18)?,
-        last_seen_at: row.get(19)?,
-        last_verified_at: row.get(20)?,
+        physical_device_id: row.get(6)?,
+        relative_path: path_from_bytes(&row.get::<_, Vec<u8>>(7)?),
+        file_size: row.get(8)?,
+        modified_at_ns: row.get(9)?,
+        created_at_ns: row.get(10)?,
+        inode: row.get(11)?,
+        device_id: row.get(12)?,
+        storage_object_key: row.get(13)?,
+        link_group_id: row.get(14)?,
+        content_id: row.get(15)?,
+        sample_hash: row.get(16)?,
+        full_hash: row.get(17)?,
+        hash_state: row.get(18)?,
+        status: row.get(19)?,
+        last_error: row.get(20)?,
+        first_seen_at: row.get(21)?,
+        last_seen_at: row.get(22)?,
+        last_verified_at: row.get(23)?,
     })
 }
 

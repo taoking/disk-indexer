@@ -4,7 +4,10 @@ use disk_indexer::config::Config;
 use disk_indexer::db::Database;
 use disk_indexer::duplicate::{DuplicateFilter, duplicate_groups, lookup};
 use disk_indexer::model::{Volume, VolumeRole};
-use disk_indexer::report::{create_cleanup_plan, duplicate_report, write_csv};
+use disk_indexer::report::{
+    CleanupVerificationOptions, create_cleanup_plan, create_cleanup_plan_with_verification,
+    duplicate_report, write_csv,
+};
 use disk_indexer::scanner::{ScanOptions, scan};
 use disk_indexer::volume::{
     MarkerPolicy, VolumeIdentityInput, register_volume, register_volume_with_identity,
@@ -34,7 +37,7 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
 
     let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
     let mut database = Database::open(&config).expect("database");
-    assert_eq!(database.schema_version().expect("schema"), 2);
+    assert_eq!(database.schema_version().expect("schema"), 3);
     let a = registered(
         register_volume(
             &mut database,
@@ -137,6 +140,12 @@ fn indexes_duplicates_incrementally_and_keeps_offline_history() {
     assert_eq!(groups[0].known_copies, 3);
     assert_eq!(groups[0].offline_copies, 1);
     assert_eq!(groups[0].missing_copies, 0);
+    assert!(
+        groups[0]
+            .copies
+            .iter()
+            .any(|copy| copy.status == "offline_unverified")
+    );
     fs::rename(offline_path, volume_c).expect("restore c");
     database
         .refresh_volume_online_states()
@@ -350,13 +359,226 @@ fn migration_backfills_physical_device_for_existing_volume_history() {
 
     let config = Config::new(Some(database_path)).expect("config");
     let database = Database::open(&config).expect("migrate legacy database");
-    assert_eq!(database.schema_version().expect("schema version"), 2);
+    assert_eq!(database.schema_version().expect("schema version"), 3);
     let volume = database
         .volume_by_uid("legacy:volume")
         .expect("volume lookup")
         .expect("legacy volume");
     assert!(volume.physical_device_id.is_some());
     assert_eq!(volume.identity_state.as_str(), "verified");
+}
+
+#[test]
+fn lookup_marks_changed_cached_hash_as_stale_until_explicit_rehash() {
+    let temp = tempdir().expect("temporary root");
+    let volume_path = temp.path().join("volume");
+    fs::create_dir_all(&volume_path).expect("volume directory");
+    let file_path = volume_path.join("photo.raw");
+    fs::write(&file_path, b"old-data").expect("initial file");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let volume = registered(
+        register_volume(
+            &mut database,
+            &volume_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register volume"),
+    );
+    scan(
+        &mut database,
+        &config,
+        &volume,
+        &ScanOptions {
+            full_hash: true,
+            ..ScanOptions::default()
+        },
+    )
+    .expect("full scan");
+    let valid = lookup(&database, &config, &file_path, false).expect("valid lookup");
+    assert!(valid.exact);
+    assert_eq!(valid.cache_state, "cache_valid");
+    assert!(valid.metadata_matches_index);
+    let previous_hash = valid.full_hash.expect("cached complete hash");
+
+    let replacement = volume_path.join("replacement");
+    fs::write(&replacement, b"new-data").expect("same-size replacement");
+    fs::rename(&replacement, &file_path).expect("replace indexed path");
+    let stale = lookup(&database, &config, &file_path, false).expect("stale lookup");
+    assert!(!stale.exact);
+    assert_eq!(stale.cache_state, "cache_stale");
+    assert_eq!(stale.hash_state, "stale");
+    assert!(stale.requires_rehash);
+    assert!(stale.full_hash.is_none());
+
+    let rehashed = lookup(&database, &config, &file_path, true).expect("rehash lookup");
+    assert!(rehashed.exact);
+    assert!(!rehashed.requires_rehash);
+    assert_ne!(rehashed.full_hash.expect("current hash"), previous_hash);
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_links_are_one_storage_object_and_never_cleanup_candidates() {
+    let temp = tempdir().expect("temporary root");
+    let volume_path = temp.path().join("volume");
+    fs::create_dir_all(&volume_path).expect("volume directory");
+    let original = volume_path.join("original.bin");
+    let linked = volume_path.join("linked.bin");
+    fs::write(&original, b"same storage object").expect("original file");
+    fs::hard_link(&original, &linked).expect("hard link");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let volume = registered(
+        register_volume(
+            &mut database,
+            &volume_path,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register volume"),
+    );
+    scan(
+        &mut database,
+        &config,
+        &volume,
+        &ScanOptions {
+            full_hash: true,
+            ..ScanOptions::default()
+        },
+    )
+    .expect("scan hard links");
+    let groups = duplicate_groups(&database, DuplicateFilter::default()).expect("duplicate groups");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].path_count, 2);
+    assert_eq!(groups[0].storage_object_count, 1);
+    assert_eq!(groups[0].theoretical_reclaimable_bytes, 0);
+    assert_eq!(groups[0].physical_device_count, 1);
+    let plan = create_cleanup_plan(&database, volume.id, volume.id, 1).expect("cleanup plan");
+    assert!(plan.items.iter().all(|item| item.status == "blocked"));
+    assert!(plan.items.iter().all(|item| {
+        item.blocked_reasons
+            .iter()
+            .any(|reason| reason.contains("硬链接"))
+    }));
+}
+
+#[test]
+fn duplicate_reports_exclude_nonpresent_statuses_and_cleanup_verifies_files() {
+    let temp = tempdir().expect("temporary root");
+    let volume_a = temp.path().join("volume-a");
+    let volume_b = temp.path().join("volume-b");
+    fs::create_dir_all(&volume_a).expect("volume a");
+    fs::create_dir_all(&volume_b).expect("volume b");
+    for name in ["one", "two", "three", "four"] {
+        fs::write(volume_a.join(name), b"same bytes").expect("copy on volume a");
+    }
+    fs::write(volume_b.join("keeper"), b"same bytes").expect("keeper copy");
+    let config = Config::new(Some(temp.path().join("index.db"))).expect("config");
+    let mut database = Database::open(&config).expect("database");
+    let a = registered(
+        register_volume(
+            &mut database,
+            &volume_a,
+            VolumeRole::LocalBackup,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register a"),
+    );
+    let b = registered(
+        register_volume(
+            &mut database,
+            &volume_b,
+            VolumeRole::Primary,
+            MarkerPolicy::WriteIfPossible,
+        )
+        .expect("register b"),
+    );
+    for volume in [&a, &b] {
+        scan(
+            &mut database,
+            &config,
+            volume,
+            &ScanOptions {
+                full_hash: true,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("full scan");
+    }
+    let changed = database
+        .file_record_by_path(
+            a.id,
+            &disk_indexer::util::path_bytes(std::path::Path::new("two")),
+        )
+        .expect("changed record lookup")
+        .expect("changed record");
+    database
+        .mark_hash_problem(changed.id, "simulated changed file", true)
+        .expect("mark changed");
+    let unreadable = database
+        .file_record_by_path(
+            a.id,
+            &disk_indexer::util::path_bytes(std::path::Path::new("three")),
+        )
+        .expect("unreadable record lookup")
+        .expect("unreadable record");
+    database
+        .mark_hash_problem(unreadable.id, "simulated unreadable file", false)
+        .expect("mark unreadable");
+    let groups = duplicate_groups(&database, DuplicateFilter::default()).expect("filtered report");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].known_copies, 3);
+    assert!(groups[0].copies.iter().all(|copy| copy.status == "present"));
+
+    let default_plan = create_cleanup_plan(&database, a.id, b.id, 1).expect("default plan");
+    assert!(
+        default_plan
+            .items
+            .iter()
+            .all(|item| item.status == "candidate_unverified")
+    );
+    let verified_plan = create_cleanup_plan_with_verification(
+        &mut database,
+        &config,
+        a.id,
+        b.id,
+        1,
+        CleanupVerificationOptions {
+            min_remaining_physical_devices: 1,
+            verify_metadata: true,
+            verify_full_hash: true,
+        },
+    )
+    .expect("verified plan");
+    assert!(
+        verified_plan
+            .items
+            .iter()
+            .all(|item| item.status == "verified_candidate")
+    );
+
+    fs::write(volume_b.join("keeper"), b"changed-ke").expect("change keeper without scan");
+    let blocked_plan = create_cleanup_plan_with_verification(
+        &mut database,
+        &config,
+        a.id,
+        b.id,
+        1,
+        CleanupVerificationOptions {
+            min_remaining_physical_devices: 1,
+            verify_metadata: true,
+            verify_full_hash: true,
+        },
+    )
+    .expect("blocked verified plan");
+    assert!(
+        blocked_plan
+            .items
+            .iter()
+            .all(|item| item.status == "blocked")
+    );
 }
 
 #[test]

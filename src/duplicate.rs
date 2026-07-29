@@ -1,5 +1,6 @@
 //! 重复内容组、查询与只读验证服务。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -47,11 +48,27 @@ pub fn duplicate_groups(
         if copies.len() < filter.min_copies {
             continue;
         }
-        let online_copies = copies
+        let online_storage_objects = copies
             .iter()
             .filter(|copy| copy.is_online && copy.status == "present")
+            .map(storage_object_identity)
+            .collect::<HashSet<_>>();
+        let storage_objects = copies
+            .iter()
+            .map(storage_object_identity)
+            .collect::<HashSet<_>>();
+        let logical_volumes = copies
+            .iter()
+            .map(|copy| copy.volume_id)
+            .collect::<HashSet<_>>();
+        let physical_devices = copies
+            .iter()
+            .map(|copy| copy.physical_device_id.unwrap_or(-copy.volume_id))
+            .collect::<HashSet<_>>();
+        let offline_copies = copies
+            .iter()
+            .filter(|copy| copy.status == "offline_unverified")
             .count();
-        let offline_copies = copies.iter().filter(|copy| !copy.is_online).count();
         let missing_copies = copies
             .iter()
             .filter(|copy| copy.status == "missing")
@@ -60,11 +77,16 @@ pub fn duplicate_groups(
             full_hash,
             file_size,
             known_copies: copies.len(),
-            online_copies,
+            online_copies: online_storage_objects.len(),
             offline_copies,
             missing_copies,
-            theoretical_reclaimable_bytes: file_size
-                .saturating_mul(u64::try_from(copies.len().saturating_sub(1)).unwrap_or(u64::MAX)),
+            path_count: copies.len(),
+            storage_object_count: storage_objects.len(),
+            logical_volume_count: logical_volumes.len(),
+            physical_device_count: physical_devices.len(),
+            theoretical_reclaimable_bytes: file_size.saturating_mul(
+                u64::try_from(online_storage_objects.len().saturating_sub(1)).unwrap_or(u64::MAX),
+            ),
             copies,
         });
     }
@@ -105,18 +127,57 @@ pub fn lookup(
             })
     });
     let mut warnings = Vec::new();
-    let (sample, full, records, exact) = if use_full_hash {
+    let direct_metadata_matches = direct.as_ref().is_some_and(|record| {
+        file_metadata(
+            &volume
+                .as_ref()
+                .expect("direct record only exists on a registered volume")
+                .mount_path,
+            &path,
+        )
+        .is_ok_and(|actual| metadata_matches_index(record, &actual))
+    });
+    let (sample, full, records, exact, cache_state, requires_rehash) = if use_full_hash {
         let hash = full_hash(&path, config.read_buffer_bytes)?;
         let records = database.records_by_full_hash(&hash.hex, file_size)?;
-        (None, Some(hash.hex), records, true)
+        (
+            None,
+            Some(hash.hex),
+            records,
+            true,
+            if direct.is_some() && !direct_metadata_matches {
+                "cache_stale"
+            } else if direct.is_some() {
+                "cache_valid"
+            } else {
+                "cache_unverified"
+            }
+            .to_owned(),
+            false,
+        )
     } else if let Some(record) = &direct {
-        if let Some(full) = &record.full_hash {
+        if !direct_metadata_matches {
+            warnings.push(
+                "索引记录的大小、修改时间、inode 或设备号已过期；未复用旧完整哈希。请传入 --full-hash 重新计算。"
+                    .to_owned(),
+            );
+            (
+                None,
+                None,
+                vec![record.clone()],
+                false,
+                "cache_stale".to_owned(),
+                true,
+            )
+        } else if let Some(full) = &record.full_hash {
             let records = database.records_by_full_hash(full, file_size)?;
             (
                 record.sample_hash.clone(),
                 Some(full.clone()),
                 records,
                 true,
+                "cache_valid".to_owned(),
+                false,
             )
         } else {
             let sample = sample_hash(&path, config.sample_bytes, config.read_buffer_bytes)?.hex;
@@ -125,7 +186,14 @@ pub fn lookup(
                 "当前仅有抽样指纹；它不能证明内容完全相同。传入 --full-hash 以得到精确结论。"
                     .to_owned(),
             );
-            (Some(sample), None, records, false)
+            (
+                Some(sample),
+                None,
+                records,
+                false,
+                "cache_unverified".to_owned(),
+                true,
+            )
         }
     } else {
         let sample = sample_hash(&path, config.sample_bytes, config.read_buffer_bytes)?.hex;
@@ -133,7 +201,14 @@ pub fn lookup(
         warnings.push(
             "文件路径不在已注册卷内，且未计算完整哈希；结果仅是候选，不是重复结论。".to_owned(),
         );
-        (Some(sample), None, records, false)
+        (
+            Some(sample),
+            None,
+            records,
+            false,
+            "cache_unverified".to_owned(),
+            true,
+        )
     };
     let copies = records.iter().map(copy_view).collect::<Vec<_>>();
     let direct_seen = direct.is_some();
@@ -152,9 +227,15 @@ pub fn lookup(
         full_hash: full,
         hash_state: if exact {
             "full".to_owned()
+        } else if cache_state == "cache_stale" {
+            "stale".to_owned()
         } else {
             "sampled".to_owned()
         },
+        exact,
+        cache_state,
+        metadata_matches_index: direct.is_some() && direct_metadata_matches,
+        requires_rehash,
         has_appeared_before: direct_seen || (exact && !records.is_empty()),
         known_copies: copies.len(),
         online_copies: copies
@@ -220,16 +301,19 @@ fn include_record(record: &FileRecord, filter: DuplicateFilter) -> bool {
             return false;
         }
     }
-    if filter.online_only && (!record.volume_online || record.status != "present") {
+    if record.status == "present" {
+        return !filter.online_only || record.volume_online;
+    }
+    if filter.online_only {
         return false;
     }
-    filter.include_missing || record.status != "missing"
+    filter.include_missing
 }
 
 #[must_use]
 pub fn copy_view(record: &FileRecord) -> CopyView {
     let status = if !record.volume_online && record.status == "present" {
-        "offline".to_owned()
+        "offline_unverified".to_owned()
     } else {
         record.status.clone()
     };
@@ -242,6 +326,22 @@ pub fn copy_view(record: &FileRecord) -> CopyView {
         path: display_path(&record.relative_path),
         status,
         is_online: record.volume_online,
+        physical_device_id: record.physical_device_id,
+        storage_object_key: record.storage_object_key.clone(),
+        link_group_id: record.link_group_id.clone(),
         last_error: record.last_error.clone(),
     }
+}
+
+fn metadata_matches_index(record: &FileRecord, metadata: &crate::model::FileMetadata) -> bool {
+    record.file_size == metadata.file_size
+        && record.modified_at_ns == metadata.modified_at_ns
+        && record.inode == metadata.inode
+        && record.device_id == metadata.device_id
+}
+
+fn storage_object_identity(copy: &CopyView) -> String {
+    copy.storage_object_key
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", copy.file_copy_id))
 }

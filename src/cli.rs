@@ -11,8 +11,9 @@ use crate::db::Database;
 use crate::duplicate::{DuplicateFilter, duplicate_groups, lookup, verify_record};
 use crate::model::VolumeRole;
 use crate::report::{
-    create_cleanup_plan, duplicate_report, render_cleanup_plan_text, render_duplicates_text,
-    render_lookup_text, write_cleanup_plan, write_csv,
+    CleanupVerificationOptions, create_cleanup_plan_with_verification, duplicate_report,
+    render_cleanup_plan_text, render_duplicates_text, render_lookup_text, write_cleanup_plan,
+    write_csv,
 };
 use crate::scanner::{ScanOptions, complete_hashes, scan};
 use crate::ui::run_local_ui;
@@ -216,6 +217,12 @@ struct CleanupPlanArgs {
     keep_volume: i64,
     #[arg(long, default_value_t = 1)]
     min_remaining_copies: usize,
+    #[arg(long, default_value_t = 1)]
+    min_remaining_physical_devices: usize,
+    #[arg(long)]
+    verify_metadata: bool,
+    #[arg(long)]
+    verify_full_hash: bool,
     #[arg(long)]
     output: PathBuf,
 }
@@ -284,11 +291,17 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Cleanup { command } => match command {
             CleanupCommand::Plan(args) => {
                 database.refresh_volume_online_states()?;
-                let plan = create_cleanup_plan(
-                    &database,
+                let plan = create_cleanup_plan_with_verification(
+                    &mut database,
+                    &config,
                     args.target_volume,
                     args.keep_volume,
                     args.min_remaining_copies,
+                    CleanupVerificationOptions {
+                        min_remaining_physical_devices: args.min_remaining_physical_devices,
+                        verify_metadata: args.verify_metadata || args.verify_full_hash,
+                        verify_full_hash: args.verify_full_hash,
+                    },
                 )?;
                 write_cleanup_plan(&args.output, &plan)?;
                 print!("{}", render_cleanup_plan_text(&plan));
