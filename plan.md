@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 8（本机 UI、公开发布与使用文档）已完成。用户已明确扩展原先“无 Web 服务”范围，新增仅本机访问的操作界面，不引入远程管理服务。
+Phase 9.1（回归基线）已完成；下一步是 Phase 9.2（身份安全修复）。本轮目标是先解决 P0 文件身份和缓存安全问题，再以 SwiftUI 原生 App 完全替代浏览器 UI。
 
 ## 已完成
 
@@ -16,10 +16,17 @@ Phase 8（本机 UI、公开发布与使用文档）已完成。用户已明确�
 - 通过最终质量门：`cargo fmt --check`、严格 clippy 和全部测试。
 - 完成三卷 CLI 验收：3 副本重复组、精确 lookup、候选/blocked 清理计划、离线保留和增量复用均已验证。
 - 完成本机 UI、展示页、UI API 单测和详细使用说明。
+- Phase 9.1：已从 `origin/main` 快进核验，阅读现有代码/文档，运行 Rust 基线质量门并确认当前 GitHub Actions 为绿色。
 
 ## 待完成
 
-- 等待 GitHub Actions 首次 CI 完成；后续按新需求扩展功能。
+- Phase 9.2：physical devices、marker 克隆冲突、人工 relink/resolve 和审计事件。
+- Phase 9.3：stale lookup、状态过滤、硬链接、清理计划验证。
+- Phase 9.4：分页、JSONL 任务协议和任务取消。
+- Phase 10.1：完全移除浏览器 UI、HTTP 服务和端口监听。
+- Phase 10.2：SwiftUI App Shell、内置 Rust CLI、概览/硬盘/设置页。
+- Phase 10.3：扫描任务、重复文件、查询、清理计划和日志页。
+- Phase 11：原生 App 测试、CI、Release App Bundle 与最终验收。
 
 ## 技术决策
 
@@ -29,12 +36,14 @@ Phase 8（本机 UI、公开发布与使用文档）已完成。用户已明确�
 - 完整 BLAKE3 且文件大小一致才构成重复组；抽样哈希只能缩小候选集合。
 - CLI 不含删除或移动文件代码路径；清理功能只输出 JSON 计划。
 - UI 用 `axum` 提供静态展示页及操作 API，但严格绑定 `127.0.0.1`；每个请求使用短生命周期 SQLite 连接，避免跨异步任务共享连接。
+- 本轮原生 App 通过 App Bundle 内置 `disk-indexer` 子进程和稳定 JSON/JSONL 协议调用 Rust，不引入 Rust/Swift FFI 或网络协议。
 
 ## 已知风险
 
 - 在只读卷且系统未提供稳定卷 UUID/序列号时，回退标识仍会纳入路径避免误合并，跨重挂载稳定性有限。
 - 扫描 `--resume` 通过已持久化元数据和幂等增量扫描恢复，不保存脆弱的目录遍历栈。
 - 本机 UI 没有认证机制，因此绝不可通过端口转发或反向代理暴露到局域网/公网。
+- Phase 9.1 基线：`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test` 已于 2026-07-29 通过（9 单元测试、3 集成测试）；当前尚无 Swift/Xcode 项目，因此 Swift build/test 门在本阶段不适用。Xcode 26.6 和 Swift 6.3.3 已验证可用。
 
 ## 发布记录
 
