@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-Phase 12.9（Swift 设置持久化与测试补齐）已完成；下一步是 Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）。本轮只进行安全性和稳定性收口，不扩展删除、隔离、相似媒体或网络功能。
+Phase 12.10（CI、App 构建运行与 GitHub Actions 验收）已完成；等待推送后的最新 GitHub Actions 结果确认。本轮未扩展删除、隔离、相似媒体或网络功能。
 
 ## 已完成
 
@@ -33,6 +33,7 @@ Phase 12.9（Swift 设置持久化与测试补齐）已完成；下一步是 Pha
 - Phase 12.7：已有数据库存在未应用迁移时，升级前使用 SQLite `VACUUM INTO` 在原数据库同目录创建带 UTC 时间戳的 `.before-migration-*.sqlite` 一致性备份；迁移前后执行 `PRAGMA quick_check` 和 `foreign_key_check`。迁移事务失败的信息会给出备份恢复路径。新增旧 schema 升级备份回归测试；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
 - Phase 12.8：`duplicates --csv` 改用内容 ID keyset 分页直接写入 CSV，新增 `duplicates --jsonl` 逐组输出 JSON Lines；两者不再先汇总完整重复报告。回归测试验证流式 CSV 与 JSONL 输出；Rust 质量门（7 单元、18 集成）与 Swift 6 项测试均通过。
 - Phase 12.9：数据库路径仅会在设置页验证成功后写入 `UserDefaults`；启动时读取非空持久值，否则使用默认 Application Support 路径。新增隔离 UserDefaults suite 的持久化测试；Swift 测试增至 7 项。
+- Phase 12.10：CI `quality` job 增加原生边界守卫，检查 Rust 核心与 Swift App 代码不得重新引入 Web/HTTP/端口监听依赖；文档补充 verified 整盘身份、流式 JSONL/CSV 和迁移备份。已实际运行边界检查、构建 `DiskIndexer.app` 并用 `open` 启动。推送后必须以最新提交的 GitHub Actions 两个 job 成功作为最终验收。
 
 ## 待完成
 
@@ -59,7 +60,7 @@ Phase 12.9（Swift 设置持久化与测试补齐）已完成；下一步是 Pha
 - Phase 10.2：Swift 子进程读取与基础参数构造已有单测；尚未接入 JSONL 实时事件、取消控制和全部业务页面，这些在 Phase 10.3 完成。
 - Phase 10.3：重复组游标以内容 ID 的稳定顺序读取；App 可对已加载页按空间、大小或副本数排序，但不会为了全局排序把全部报告读入内存。
 - Phase 11：当前 Bundle 为未签名 Debug 构建，尚未做 Developer ID 签名、公证或 dmg/pkg 发布；Universal 2 只保留了构建扩展说明，尚未实际合并 x86_64 二进制。GitHub Actions 会在推送本提交后验证 macOS 环境。
-- Phase 12.9：安全、进度、恢复、迁移和设置收口已完成；仍需在 Phase 12.10 加固 CI 禁止项、构建并实际启动 App、推送后确认最新 GitHub Actions 成功。
+- Phase 12.10：本地完整质量门、原生 App 构建/启动已完成；当前仅剩推送本阶段提交并确认最新 GitHub Actions 实际成功。
 
 ## 发布记录
 

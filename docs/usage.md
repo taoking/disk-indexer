@@ -75,6 +75,7 @@ disk-indexer scan show 12 --json
 disk-indexer lookup /Volumes/NewDisk/DCIM/IMG_0001.RAW --full-hash --json
 disk-indexer duplicates --min-copies 3 --online-only
 disk-indexer duplicates --csv duplicates.csv
+disk-indexer duplicates --jsonl > duplicates.jsonl
 disk-indexer duplicates --json --page --after-content-id 0 --limit 50
 disk-indexer stats --json
 disk-indexer verify --volume 1 --full-hash
@@ -86,7 +87,7 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 
 `--json` 适用于脚本或未来 GUI；进度和警告不混入 JSON 标准输出。`duplicates` 的 CSV 将每个副本展开为一行。`lookup --full-hash` 会对路径当前的文件执行精确完整哈希；未传该参数时，抽样匹配只能作为候选提示。
 
-`duplicates --json --page` 使用 `next_after_content_id` 游标逐页返回重复组，适合原生 App 和大报告浏览；它不与 `--csv` 一起使用，以免产生不完整导出。`stats --json` 返回只读概览统计（schema、卷、文件、完整哈希、可信重复组和理论空间），不会返回文件路径。
+`duplicates --csv` 与 `duplicates --jsonl` 会用内容 ID keyset 分页流式写出，不必先把完整报告载入内存；JSONL 每行一个重复组。`duplicates --json --page` 使用 `next_after_content_id` 游标逐页返回重复组，适合原生 App 和大报告浏览；它不与 `--csv` 一起使用，以免产生不完整导出。`stats --json` 返回只读概览统计（schema、卷、文件、完整哈希、可信重复组和理论空间），不会返回文件路径。
 
 长任务供原生 App 或脚本消费时使用 `--jsonl-progress`。stdout 每行都是一个 JSON 事件，绝不混入普通提示文本；诊断日志仍写入 stderr。每个事件包含 `protocol_version`、`type`、`task_id`、`timestamp` 和 `operation`。可用操作：
 
@@ -114,6 +115,8 @@ disk-indexer cleanup plan --target-volume 2 --keep-volume 1 \
 ```
 
 严格验证全部通过才会得到 `verified_candidate`；任一候选或保留副本失效、剩余独立存储对象不足、物理设备不足或目标是硬链接路径时均为 `blocked`。工具不会执行删除。
+
+物理设备计数只使用整盘硬件序列号或整盘 Media UUID 已确认的 `verified` 身份。卷 UUID、分区 UUID、挂载路径和 unknown/inferred 身份不会被当作独立物理备份。升级旧数据库前，工具会在数据库同目录创建 `.before-migration-<UTC>.sqlite` 一致性备份，并在迁移前后运行 SQLite 完整性和外键检查；若迁移失败，错误信息会给出可恢复的备份路径。
 
 每次实际人工清理前，应重新扫描相关卷，并对计划中的文件执行 `verify --file-copy <id> --full-hash`。同一物理硬盘的不同分区不等于独立备份；内容相同不等于副本多余。
 

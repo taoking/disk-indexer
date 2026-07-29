@@ -48,6 +48,7 @@ disk-indexer volume conflicts
 disk-indexer scan /Volumes/Photos
 disk-indexer hash complete --all
 disk-indexer duplicates --csv duplicates.csv
+disk-indexer duplicates --jsonl > duplicates.jsonl
 disk-indexer stats --json
 disk-indexer lookup /Volumes/NewDisk/IMG_0001.RAW --full-hash
 disk-indexer verify --volume 1 --full-hash
@@ -79,6 +80,7 @@ disk-indexer volume relink --volume 3 --path /Volumes/Photos
 - 快速指纹仅用于筛选，不能成为清理结论。
 - `lookup` 的 `cache_stale` 表示当前元数据与索引不一致；必须使用 `--full-hash` 重新计算后才会给出精确结论。
 - 默认清理计划是 `candidate_unverified`，只是人工审核材料。只有 `--verify-metadata` 或 `--verify-full-hash` 成功后才会标为 `verified_candidate`。
+- 物理设备阈值只统计已验证的整盘硬件序列号或整盘 Media UUID；卷 UUID、分区 UUID、路径以及 unknown/inferred 身份绝不算作独立物理备份。
 - 同一存储对象的多个硬链接只算一个对象；删除其中一个路径不会被建议为释放完整文件空间。
 - 卷离线只会显示为 `offline`，不会批量标记为 `missing`。
 - 扫描出错或中断时，不会据此把未遍历文件标记为缺失。
